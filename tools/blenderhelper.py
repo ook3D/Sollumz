@@ -28,6 +28,38 @@ def create_brush(name):
     return bpy.data.brushes[name]
 
 
+def apply_terrain_brush_settings(brush, idx: int, paint_alpha: float | None = None):
+    if idx < 5:
+        brush.blend = "MIX"
+    if idx == 1:
+        brush.color = (0, 0, 0)
+        brush.strength = 1
+    elif idx == 2:
+        brush.color = (0, 0, 1)
+        brush.strength = 1
+    elif idx == 3:
+        brush.color = (0, 1, 0)
+        brush.strength = 1
+    elif idx == 4:
+        brush.color = (0, 1, 1)
+        brush.strength = 1
+    elif idx == 5:
+        assert paint_alpha is not None, "paint_alpha required"
+        if paint_alpha > 0:
+            brush.color = (1, 1, 1)
+            brush.blend = "ADD_ALPHA"
+            brush.strength = paint_alpha
+        else:
+            brush.color = (0, 0, 0)
+            brush.blend = "ERASE_ALPHA"
+            brush.strength = paint_alpha * -1
+
+
+def apply_terrain_brush_setting_to_current_brush(idx: int, paint_alpha: float | None = None):
+    brush = bpy.context.scene.tool_settings.vertex_paint.brush
+    apply_terrain_brush_settings(brush, idx, paint_alpha)
+
+
 def material_from_image(img, name="Material", nodename="Image"):
     mat = bpy.data.materials.new(name)
     mat.use_nodes = True
@@ -435,3 +467,29 @@ def find_bsdf_and_material_output(material: bpy.types.Material) -> Tuple[bpy.typ
             bsdf = node
 
     return bsdf, material_output
+
+
+def place_object_in_collection(new_obj: bpy.types.Object, reference_obj: bpy.types.Object = None):
+    target_collection = None
+
+    if reference_obj:
+        # Get the first collection that contains the reference object
+        for collection in bpy.data.collections:
+            if reference_obj.name in collection.objects:
+                target_collection = collection
+                break
+
+        # If reference object is in scene collection but not in any named collection
+        if not target_collection and reference_obj.name in bpy.context.scene.collection.objects:
+            target_collection = bpy.context.scene.collection
+
+    # Fallback to active collection or scene collection
+    if not target_collection:
+        if hasattr(bpy.context, 'collection') and bpy.context.collection:
+            target_collection = bpy.context.collection
+        else:
+            target_collection = bpy.context.scene.collection
+
+    # Add object to target collection if not already there
+    if new_obj.name not in target_collection.objects:
+        target_collection.objects.link(new_obj)

@@ -5,7 +5,7 @@ from ...sollumz_helper import SOLLUMZ_OT_base, find_sollumz_parent
 from ...sollumz_properties import SOLLUMZ_UI_NAMES, LODLevel, SollumType
 from ...tools.drawablehelper import set_recommended_bone_properties, convert_obj_to_drawable, convert_obj_to_model, convert_objs_to_single_drawable, center_drawable_to_models
 from ...tools.boundhelper import convert_obj_to_composite, convert_objs_to_single_composite
-from ...tools.blenderhelper import add_armature_modifier, add_child_of_bone_constraint, create_blender_object, create_empty_object, duplicate_object, get_child_of_constraint, set_child_of_constraint_space, tag_redraw
+from ...tools.blenderhelper import add_armature_modifier, add_child_of_bone_constraint, create_blender_object, create_empty_object, duplicate_object, get_child_of_constraint, set_child_of_constraint_space, tag_redraw, place_object_in_collection
 from ...sollumz_helper import get_sollumz_materials
 from ..properties import DrawableShaderOrder
 from ...tools.meshhelper import (
@@ -32,6 +32,8 @@ class SOLLUMZ_OT_create_drawable(bpy.types.Operator):
         drawable_obj = create_empty_object(SollumType.DRAWABLE)
         drawable_obj.parent = parent
 
+        place_object_in_collection(drawable_obj, parent)
+
         return {"FINISHED"}
 
 
@@ -50,6 +52,8 @@ class SOLLUMZ_OT_create_drawable_dict(bpy.types.Operator):
 
         ydd_obj = create_empty_object(SollumType.DRAWABLE_DICTIONARY)
         ydd_obj.parent = parent
+
+        place_object_in_collection(ydd_obj, parent)
 
         return {"FINISHED"}
 
@@ -591,6 +595,8 @@ class SOLLUMZ_OT_extract_lods(bpy.types.Operator):
                 continue
 
             lod_obj = create_blender_object(SollumType.NONE, lod_mesh.name, lod_mesh)
+
+            place_object_in_collection(lod_obj, aobj)
             self.parent_object(lod_obj, parent)
 
         return {"FINISHED"}
@@ -603,6 +609,7 @@ class SOLLUMZ_OT_extract_lods(bpy.types.Operator):
             context.collection.children.link(parent)
         else:
             parent = create_empty_object(SollumType.NONE, name)
+            place_object_in_collection(parent)
 
         return parent
 

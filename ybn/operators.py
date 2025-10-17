@@ -8,7 +8,7 @@ from ..tools.boundhelper import create_bound_shape, convert_objs_to_composites, 
 from ..tools.meshhelper import create_box_from_extents
 from ..sollumz_properties import SollumType, SOLLUMZ_UI_NAMES, BOUND_TYPES, MaterialType, BOUND_POLYGON_TYPES
 from ..sollumz_helper import SOLLUMZ_OT_base
-from ..tools.blenderhelper import get_selected_vertices, get_children_recursive, create_blender_object, create_empty_object, tag_redraw
+from ..tools.blenderhelper import get_selected_vertices, get_children_recursive, create_blender_object, create_empty_object, tag_redraw, place_object_in_collection
 import bpy
 from mathutils import Vector
 
@@ -30,6 +30,8 @@ class SOLLUMZ_OT_create_polygon_bound(bpy.types.Operator):
 
         bound_obj = create_bound_shape(bound_type)
         bound_obj.parent = parent
+
+        place_object_in_collection(bound_obj, parent)
 
         return {"FINISHED"}
 
@@ -60,7 +62,8 @@ class SOLLUMZ_OT_create_polygon_box_from_verts(bpy.types.Operator):
     )
     sollum_type: bpy.props.EnumProperty(
         items=[
-            (SollumType.BOUND_POLY_BOX.value, SOLLUMZ_UI_NAMES[SollumType.BOUND_POLY_BOX], "Create a bound polygon box object"),
+            (SollumType.BOUND_POLY_BOX.value,
+             SOLLUMZ_UI_NAMES[SollumType.BOUND_POLY_BOX], "Create a bound polygon box object"),
             (SollumType.BOUND_BOX.value, SOLLUMZ_UI_NAMES[SollumType.BOUND_BOX], "Create a bound box object")],
         name="Type",
         default=None
@@ -104,6 +107,9 @@ class SOLLUMZ_OT_create_polygon_box_from_verts(bpy.types.Operator):
         pobj.location = center
 
         pobj.parent = parent
+
+        reference_obj = parent if parent else (objects[0] if objects else None)
+        place_object_in_collection(pobj, reference_obj)
 
         return {"FINISHED"}
 
@@ -162,6 +168,9 @@ class SOLLUMZ_OT_create_bound(bpy.types.Operator):
             bound_obj = create_bound_shape(bound_type)  # Create shape for other bounds
 
         bound_obj.parent = parent
+
+
+        place_object_in_collection(bound_obj, parent)
 
         apply_flag_preset(bound_obj, context.window_manager.sz_flag_preset_index)
 
@@ -404,6 +413,5 @@ class SOLLUMZ_OT_clear_col_flags(SOLLUMZ_OT_base, bpy.types.Operator):
                 aobj.composite_flags2[flag_name] = False
 
             tag_redraw(context)
-
 
         return True
