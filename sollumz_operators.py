@@ -14,6 +14,7 @@ from .cwxml.drawable import YDR, YDD
 from .cwxml.fragment import YFT
 from .cwxml.bound import YBN
 from .cwxml.navmesh import YNV
+from .cwxml.nodepath import YND
 from .cwxml.clipdictionary import YCD
 from .cwxml.ytyp import YTYP
 from .cwxml.ymap import YMAP
@@ -26,6 +27,7 @@ from .yft.yftexport import export_yft
 from .ybn.ybnimport import import_ybn
 from .ybn.ybnexport import export_ybn
 from .ynv.ynvimport import import_ynv
+from .ynd.yndimport import import_ynd
 from .ycd.ycdimport import import_ycd
 from .ycd.ycdexport import export_ycd
 from .ymap.ymapimport import import_ymap
@@ -70,7 +72,7 @@ class SOLLUMZ_OT_import_assets(bpy.types.Operator, ImportHelper, TimedOperator):
     )
 
     filter_glob: bpy.props.StringProperty(
-        default="".join(f"*{filetype.file_extension};" for filetype in (YDR, YDD, YFT, YBN, YNV, YCD, YMAP, YTYP)),
+        default="".join(f"*{filetype.file_extension};" for filetype in (YDR, YDD, YFT, YBN, YNV, YND, YCD, YMAP, YTYP)),
         options={"HIDDEN", "SKIP_SAVE"},
         maxlen=255,
     )
@@ -105,6 +107,8 @@ class SOLLUMZ_OT_import_assets(bpy.types.Operator, ImportHelper, TimedOperator):
                         import_ybn(filepath)
                     elif YNV.file_extension in filepath:
                         import_ynv(filepath)
+                    elif YND.file_extension in filepath:
+                        import_ynd(filepath)
                     elif YCD.file_extension in filepath:
                         import_ycd(filepath)
                     elif YMAP.file_extension in filepath:
@@ -437,6 +441,12 @@ def sollumz_menu_func_import(self, context):
                          text=f"CodeWalker XML({YDR.file_extension}, {YDD.file_extension}, {YFT.file_extension}, {YBN.file_extension}, {YCD.file_extension})")
 
 
+def ynd_menu_func_import(self, context):
+    from .ynd.operators import SOLLUMZ_OT_import_ynd
+    self.layout.operator(SOLLUMZ_OT_import_ynd.bl_idname,
+                         text=f"Node Dictionary ({YND.file_extension})")
+
+
 def sollumz_menu_func_export(self, context):
     self.layout.operator(SOLLUMZ_OT_export_assets.bl_idname,
                          text=f"CodeWalker XML({YDR.file_extension}, {YDD.file_extension}, {YFT.file_extension}, {YBN.file_extension}, {YCD.file_extension})")
@@ -576,9 +586,11 @@ class SearchEnumHelper:
 
 def register():
     bpy.types.TOPBAR_MT_file_import.append(sollumz_menu_func_import)
+    bpy.types.TOPBAR_MT_file_import.append(ynd_menu_func_import)
     bpy.types.TOPBAR_MT_file_export.append(sollumz_menu_func_export)
 
 
 def unregister():
+    bpy.types.TOPBAR_MT_file_import.remove(ynd_menu_func_import)
     bpy.types.TOPBAR_MT_file_import.remove(sollumz_menu_func_import)
     bpy.types.TOPBAR_MT_file_export.remove(sollumz_menu_func_export)

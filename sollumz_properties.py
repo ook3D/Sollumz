@@ -60,6 +60,11 @@ class SollumType(str, Enum):
 
     CHARACTER_CLOTH_MESH = "sollumz_character_cloth_mesh"
 
+    YND = "sollumz_ynd"
+    YND_NODE = "sollumz_ynd_node"
+    YND_LINK = "sollumz_ynd_link"
+    YND_LINKS = "sollumz_ynd_links"
+
 
 class LightType(str, Enum):
     NONE = "sollumz_light_none"
@@ -263,6 +268,11 @@ SOLLUMZ_UI_NAMES = {
     SollumType.YMAP_BOX_OCCLUDER: "Box Occluder",
     SollumType.YMAP_MODEL_OCCLUDER: "Model Occluder",
     SollumType.YMAP_CAR_GENERATOR: "Car Generator",
+
+    SollumType.YND: "YND",
+    SollumType.YND_NODE: "YND Node",
+    SollumType.YND_LINK: "YND Link",
+    SollumType.YND_LINKS: "YND Links",
 
     MaterialType.NONE: "None",
     MaterialType.SHADER: "Sollumz Material",
