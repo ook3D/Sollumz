@@ -249,11 +249,8 @@ def create_bound_asset(obj: Object, is_root: bool = False) -> Optional[AssetBoun
             bound, vertices, primitives = init_bound_geometry_asset(obj)
 
             if vertices and primitives:
-                mesh_vertices = np.array([v.co for v in vertices])
-                mesh_faces = []
-                for prim in primitives:
-                    mesh_faces.append(prim.vertices)
-                mesh_faces = np.array(mesh_faces)
+                mesh_vertices = np.array([v.co for v in vertices], dtype=np.float32)
+                mesh_faces = np.array([prim.vertices for prim in primitives], dtype=np.int32)
 
                 centroid, radius_around_centroid = get_centroid_of_mesh(mesh_vertices)
                 volume, cg, inertia = get_mass_properties_of_mesh(mesh_vertices, mesh_faces)
@@ -281,18 +278,19 @@ def create_bound_asset(obj: Object, is_root: bool = False) -> Optional[AssetBoun
 
             non_tri_primitives = []
             if vertices and primitives:
-                mesh_vertices = np.array([v.co for v in vertices])
-                mesh_faces = []
+                mesh_vertices = np.array([v.co for v in vertices], dtype=np.float32)
+                # Separate triangle primitives from other primitives
+                tri_primitives = []
                 for prim in primitives:
                     if prim.primitive_type != BoundPrimitiveType.TRIANGLE:
                         non_tri_primitives.append(prim)
-                        continue
-                    mesh_faces.append(prim.vertices)
+                    else:
+                        tri_primitives.append(prim.vertices)
 
                 centroid, radius_around_centroid = get_centroid_of_mesh(mesh_vertices)
-                if len(mesh_faces) > 0:
+                if tri_primitives:
                     # If we have a mesh, calculate the center of gravity from the mesh
-                    mesh_faces = np.array(mesh_faces)
+                    mesh_faces = np.array(tri_primitives, dtype=np.int32)
                     _, cg, _ = get_mass_properties_of_mesh(mesh_vertices, mesh_faces)
                 else:
                     # Otherwise, approximate with the centroid
@@ -586,35 +584,82 @@ def create_primitive_triangles(
     get_mat_data: Callable[[Material], CollisionMaterial]
 ) -> list[BoundPrimitive]:
     """Create all primitive triangles objects for this mesh."""
-    triangles: list[BoundPrimitive] = []
+    num_triangles = len(mesh.loop_triangles)
+    if num_triangles == 0:
+        return []
 
+    num_loops = len(mesh.loops)
+    num_verts = len(mesh.vertices)
+
+    # extract vertex positions
+    vert_positions = np.empty(num_verts * 3, dtype=np.float32)
+    mesh.vertices.foreach_get("co", vert_positions)
+    vert_positions = vert_positions.reshape((num_verts, 3))
+
+    # extract loop vertex indices
+    loop_vert_indices = np.empty(num_loops, dtype=np.int32)
+    mesh.loops.foreach_get("vertex_index", loop_vert_indices)
+
+    # extract triangle data
+    tri_loops = np.empty(num_triangles * 3, dtype=np.int32)
+    mesh.loop_triangles.foreach_get("loops", tri_loops)
+    tri_loops = tri_loops.reshape((num_triangles, 3))
+
+    tri_mat_indices = np.empty(num_triangles, dtype=np.int32)
+    mesh.loop_triangles.foreach_get("material_index", tri_mat_indices)
+
+    # Get vertex positions for all loops in all triangles
+    # tri_loops contains loop indices, loop_vert_indices maps loop -> vertex
+    all_loop_indices = tri_loops.ravel()
+    all_vert_indices = loop_vert_indices[all_loop_indices]
+    all_positions = vert_positions[all_vert_indices]
+
+    # Apply transforms using matrix multiplication
+    # transforms is a 4x4 matrix, we need to apply it to all positions
+    transforms_arr = np.array(transforms, dtype=np.float32)
+    rotation_scale = transforms_arr[:3, :3]
+    translation = transforms_arr[:3, 3]
+    all_positions_transformed = all_positions @ rotation_scale.T + translation
+
+    # Handle colors
     color_attr_name = get_color_attr_name(0)
     color_attr = mesh.color_attributes.get(color_attr_name, None)
     if color_attr is not None and (color_attr.domain != "CORNER" or color_attr.data_type != "BYTE_COLOR"):
         color_attr = None
 
-    for tri in mesh.loop_triangles:
-        mat = mesh.materials[tri.material_index]
-        mat_data = get_mat_data(mat)
+    all_colors = None
+    if color_attr is not None:
+        # extract colors for all loops
+        loop_colors = np.empty(num_loops * 4, dtype=np.float32)
+        color_attr.data.foreach_get("color_srgb", loop_colors)
+        loop_colors = loop_colors.reshape((num_loops, 4))
 
+        # Get colors for all triangle loops and convert to int
+        all_colors_float = loop_colors[all_loop_indices]
+        all_colors = np.rint(all_colors_float * 255).astype(np.int32)
+
+    # Cache material data lookups
+    mat_data_cache: dict[int, CollisionMaterial] = {}
+
+    # Build triangles
+    triangles: list[BoundPrimitive] = []
+    for tri_idx in range(num_triangles):
+        mat_idx = tri_mat_indices[tri_idx]
+        if mat_idx not in mat_data_cache:
+            mat_data_cache[mat_idx] = get_mat_data(mesh.materials[mat_idx])
+        mat_data = mat_data_cache[mat_idx]
+
+        base_idx = tri_idx * 3
         tri_indices: list[int] = []
 
-        for loop_idx in tri.loops:
-            loop = mesh.loops[loop_idx]
-
-            vert_pos = transforms @ mesh.vertices[loop.vertex_index].co
-            vert_color = color_attr.data[loop_idx].color_srgb if color_attr is not None else None
-            if vert_color is not None:
-                vert_color = tuple(int(c * 255) for c in vert_color)
-            vert_ind = get_vert_index(vert_pos, vert_color=vert_color)
-
+        for i in range(3):
+            pos_idx = base_idx + i
+            pos = all_positions_transformed[pos_idx]
+            vert_color = tuple(all_colors[pos_idx]) if all_colors is not None else None
+            vert_ind = get_vert_index(Vector(pos), vert_color=vert_color)
             tri_indices.append(vert_ind)
 
-        v0 = tri_indices[0]
-        v1 = tri_indices[1]
-        v2 = tri_indices[2]
-
-        triangles.append(BoundPrimitive.new_triangle(v0, v1, v2, mat_data))
+        triangles.append(BoundPrimitive.new_triangle(tri_indices[0], tri_indices[1], tri_indices[2], mat_data))
 
     return triangles
 
