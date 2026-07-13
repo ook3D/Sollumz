@@ -24,12 +24,22 @@ from ..shared.multiselection import (
     MultiSelectProperty,
     define_multiselect_collection,
 )
+from ..shared.texture_compressor.properties import compressor_preset_search
 
 
 def get_texture_name(image: Image | None) -> str:
-    if image:
-        return os.path.splitext(bpy.path.basename(image.filepath))[0].lower()
-    return ""
+    if not image:
+        return ""
+
+    if name := os.path.splitext(bpy.path.basename(image.filepath))[0]:
+        return name.lower()
+
+    # No file path (e.g. a generated image, or one packed without ever being saved): use the image
+    # datablock name, dropping an image file extension the user may have typed (e.g. "rock_d.png").
+    name, ext = os.path.splitext(image.name)
+    if ext.lower() not in bpy.path.extensions_image:
+        name = image.name
+    return name.lower()
 
 
 class TextureSlot(PropertyGroup):
@@ -41,6 +51,13 @@ class TextureSlot(PropertyGroup):
     name: StringProperty(name="Name", get=get_name)
 
     managed_by_source: BoolProperty(name="Managed by Source", default=False)
+
+    compressor_preset: StringProperty(
+        name="Compression Preset",
+        description="Texture compression preset used to convert this texture to DDS on export. "
+        "Leave empty to automatically match a preset by name",
+        search=compressor_preset_search,
+    )
 
 
 class TextureSlotSelectionAccess(MultiSelectAccess):
@@ -177,6 +194,13 @@ class TextureDictionary(PropertyGroup):
         for src in self.sources:
             src.refresh(context)
 
+        # Source-managed slots are recreated below, so carry over their per-slot settings by image.
+        compressor_presets = {
+            tex.image.name: tex.compressor_preset
+            for tex in self.textures
+            if tex.managed_by_source and tex.image is not None and tex.compressor_preset
+        }
+
         self._remove_textures_from_sources()
 
         images = set(s.image for src in self.sources for s in src.images if s.use)
@@ -185,6 +209,7 @@ class TextureDictionary(PropertyGroup):
             tex = self.textures.add()
             tex.image = img
             tex.managed_by_source = True
+            tex.compressor_preset = compressor_presets.get(img.name, "")
 
         if self.textures:
             self.textures.select(0)

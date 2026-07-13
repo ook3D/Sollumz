@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 from typing import Literal
 from mathutils import Quaternion
-from .sollumz_helper import SOLLUMZ_OT_base, find_sollumz_parent
+from .sollumz_helper import SOLLUMZ_OT_base, find_sollumz_parent, get_sollumz_materials
 from .sollumz_properties import SollumType, SOLLUMZ_UI_NAMES, TimeFlagsMixin
 from .sollumz_preferences import get_addon_preferences, get_import_settings, get_export_settings, ImportSettingsBase, ExportSettingsBase
 from szio.gta5.cwxml import (
@@ -37,6 +37,7 @@ from .iecontext import (
     import_context_scope,
     ImportContext,
 )
+from .shared.texture_compressor.session import TextureConversionSession
 
 from . import logger
 
@@ -384,6 +385,29 @@ def _get_only_parent_objs(objs: list[Object]) -> list[Object]:
     return list(parent_objs)
 
 
+def _collect_texture_compression_items(context, objs: list[Object], ytd_indices: list[int]) -> list:
+    """Collects the embedded textures about to be exported, as `TextureConversionSession.prepare`
+    items, so all of them can be converted in a single batched compressor invocation."""
+    from .ydr.ydrexport import get_embedded_texture_nodes_from_materials
+
+    items = []
+    for obj in objs:
+        if obj.sollum_type not in (SollumType.DRAWABLE, SollumType.DRAWABLE_DICTIONARY, SollumType.FRAGMENT):
+            continue
+        for node in get_embedded_texture_nodes_from_materials(get_sollumz_materials(obj)):
+            # The node name is the texture parameter this texture is assigned to (e.g. "DiffuseSampler")
+            items.append((node.image, node.sollumz_texture_name, node.name, node.texture_properties.compressor_preset))
+
+    for txd_index in ytd_indices:
+        txd = context.scene.sz_txds.texture_dictionaries[txd_index]
+        # The YTD export refreshes the sources again, but do it here too so textures newly added to
+        # a source folder are part of this batch. Textures not collected here are not converted.
+        txd.refresh_from_sources(context)
+        items.extend((slot.image, slot.name, None, slot.compressor_preset) for slot in txd.textures)
+
+    return items
+
+
 class ExportAssetsOperatorImpl(ExportSettingsBase, TimedOperator):
     """Export RAGE asset files"""
 
@@ -469,6 +493,11 @@ class ExportAssetsOperatorImpl(ExportSettingsBase, TimedOperator):
             else:
                 export_ytds = False
 
+            ytd_indices = (
+                self._collect_ytds_for_export(context, prefs_export_settings.export_ytds_include)
+                if export_ytds else []
+            )
+
             self.directory = bpy.path.abspath(self.directory)
 
             if not objs and not export_ytyps and not export_ymaps and not export_ytds:
@@ -491,27 +520,41 @@ class ExportAssetsOperatorImpl(ExportSettingsBase, TimedOperator):
             directory = Path(self.directory)
             any_warnings_or_errors = False
 
-            if objs:
-                any_warnings_or_errors = self._export_objects(objs, directory, export_settings, op_log) or any_warnings_or_errors
+            # One texture conversion session shared by the whole export operation: the non-DDS
+            # embedded textures about to be exported are collected up front and converted in a
+            # single batched compressor invocation. The converted temp files must outlive the
+            # bundle saves below, so cleanup only happens once every asset has been exported.
+            textures_session = TextureConversionSession(get_addon_preferences(context).texture_compressor.to_settings())
+            try:
+                if textures_session.settings is not None:
+                    textures_session.prepare(_collect_texture_compression_items(context, objs, ytd_indices))
+                    any_warnings_or_errors = op_log.has_warnings_or_errors
 
-            if export_ytyps:
-                ytyps = self._collect_ytyps_for_export(context, prefs_export_settings.export_ytyps_include)
-                any_warnings_or_errors = self._export_ytyps(context, ytyps, directory, export_settings, op_log) or any_warnings_or_errors
+                if objs:
+                    any_warnings_or_errors = self._export_objects(
+                        objs, directory, export_settings, op_log, textures_session) or any_warnings_or_errors
 
-            if export_ymaps:
-                ymaps = self._collect_ymaps_for_export(context, prefs_export_settings.export_ymaps_include)
-                any_warnings_or_errors = self._export_ymaps(context, ymaps, directory, export_settings, op_log) or any_warnings_or_errors
+                if export_ytyps:
+                    ytyps = self._collect_ytyps_for_export(context, prefs_export_settings.export_ytyps_include)
+                    any_warnings_or_errors = self._export_ytyps(context, ytyps, directory, export_settings, op_log) or any_warnings_or_errors
 
-            if export_ytds:
-                ytds = self._collect_ytds_for_export(context, prefs_export_settings.export_ytds_include)
-                any_warnings_or_errors = self._export_ytds(context, ytds, directory, export_settings, op_log) or any_warnings_or_errors
+                if export_ymaps:
+                    ymaps = self._collect_ymaps_for_export(context, prefs_export_settings.export_ymaps_include)
+                    any_warnings_or_errors = self._export_ymaps(context, ymaps, directory, export_settings, op_log) or any_warnings_or_errors
+
+                if export_ytds:
+                    ytds_had_warnings = self._export_ytds(
+                        context, ytd_indices, directory, export_settings, op_log, textures_session)
+                    any_warnings_or_errors = ytds_had_warnings or any_warnings_or_errors
+            finally:
+                textures_session.cleanup()
 
             logger.info(f"Exported in {self.time_elapsed} seconds")
             if any_warnings_or_errors and bpy.ops.screen.info_log_show.poll():
                 bpy.ops.screen.info_log_show()
             return {"FINISHED"}
 
-    def _export_objects(self, objs: list[Object], directory: Path, export_settings, op_log) -> bool:
+    def _export_objects(self, objs: list[Object], directory: Path, export_settings, op_log, textures_session) -> bool:
         from .ybn.ybnexport import export_ybn as export_ybn_asset
         from .ydr.ydrexport import export_ydr as export_ydr_asset
         from .ydd.yddexport import export_ydd as export_ydd_asset
@@ -525,7 +568,7 @@ class ExportAssetsOperatorImpl(ExportSettingsBase, TimedOperator):
                 asset_name = remove_number_suffix(obj.name.lower())
                 export_bundle = None
                 legacy_success = False
-                with export_context_scope(ExportContext(asset_name, export_settings)):
+                with export_context_scope(ExportContext(asset_name, export_settings, textures=textures_session)):
                     match obj.sollum_type:
                         case SollumType.BOUND_COMPOSITE:
                             export_bundle = export_ybn_asset(obj)
@@ -618,7 +661,9 @@ class ExportAssetsOperatorImpl(ExportSettingsBase, TimedOperator):
         else:
             return list(range(len(txds)))
 
-    def _export_ytds(self, context, txd_indices: list[int], directory: Path, export_settings, op_log) -> bool:
+    def _export_ytds(
+        self, context, txd_indices: list[int], directory: Path, export_settings, op_log, textures_session
+    ) -> bool:
         from .ytd.ytdexport import export_ytd as export_ytd_asset
 
         any_warnings_or_errors = False
@@ -628,7 +673,7 @@ class ExportAssetsOperatorImpl(ExportSettingsBase, TimedOperator):
             txd = context.scene.sz_txds.texture_dictionaries[txd_index]
             try:
                 asset_name = txd.name.lower()
-                with export_context_scope(ExportContext(asset_name, export_settings)):
+                with export_context_scope(ExportContext(asset_name, export_settings, textures=textures_session)):
                     export_bundle = export_ytd_asset(txd)
 
                 any_warnings_or_errors = self._save_bundle(txd.name, export_bundle, directory, export_settings, op_log) or any_warnings_or_errors

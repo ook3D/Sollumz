@@ -4,12 +4,16 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from enum import Enum, auto
+from typing import TYPE_CHECKING
 
 from szio import VPath
 from szio.gta5 import Asset, AssetFormat, AssetTarget, SaveOptions, save_asset
 from szio.types import DataSource
 
 from .ydr.vertex_buffer_builder_domain import VBBuilderDomain
+
+if TYPE_CHECKING:
+    from .shared.texture_compressor.session import TextureConversionSession
 
 
 class ImportTexturesMode(Enum):
@@ -167,6 +171,10 @@ class ExportContext:
 
     asset_name: str
     settings: ExportSettings
+    textures: "TextureConversionSession | None" = None
+    """Texture conversion session shared across the whole export operation, or None when texture
+    compression is not active.
+    """
 
     def make_bundle(
         self,
@@ -233,6 +241,11 @@ def export_context() -> ExportContext:
         raise RuntimeError(
             "No export context! Make sure to use `export_context_scope` before calling import functions."
         )
+    return g_export_context
+
+
+def current_export_context() -> ExportContext | None:
+    """Gets the current export context, or None if not in export context."""
     return g_export_context
 
 

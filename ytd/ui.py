@@ -389,6 +389,8 @@ class SOLLUMZ_PT_txd_textures_panel(TxdToolChildPanel, Panel):
         row.alignment = "RIGHT"
         row.label(text=f"{w} × {h}")
 
+        box.prop(tex, "compressor_preset")
+
 
 class SOLLUMZ_PT_txd_sources_panel(TxdToolChildPanel, Panel):
     bl_label = "Sources"

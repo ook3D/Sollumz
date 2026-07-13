@@ -759,9 +759,13 @@ class SOLLUMZ_PT_TXTPARAMS_PANEL(bpy.types.Panel):
                 split = layout.split(factor=SPLIT_FACTOR)  # split to align the props with the image selector
                 _ = split.row()
                 row = split.row()
-                row.enabled = n.image.filepath != ""
                 row.prop(n.texture_properties, "embedded")
                 row.prop(n.image.colorspace_settings, "name", text="Color Space")
+
+                split = layout.split(factor=SPLIT_FACTOR)
+                _ = split.row()
+                row = split.row()
+                row.prop(n.texture_properties, "compressor_preset", text="Compression Preset")
 
 
 class SOLLUMZ_PT_VALUEPARAMS_PANEL(bpy.types.Panel):

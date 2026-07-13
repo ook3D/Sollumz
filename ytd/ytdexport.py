@@ -7,8 +7,8 @@ from szio.gta5 import AssetTextureDictionary, EmbeddedTexture
 from szio.types import DataSource
 
 from .. import logger
-from ..iecontext import ExportBundle, export_context
-from ..shared.texture_compressor.imageutils import image_source_path, is_dds_image
+from ..iecontext import ExportBundle, current_export_context, export_context
+from ..shared.texture_compressor.imageutils import image_source_path, is_dds_image, is_generated_image
 from .properties import TextureDictionary
 
 
@@ -115,7 +115,8 @@ def extract_texture_dds_data_source(img: Image, texture_name: str) -> DataSource
     texture_name_dds = f"{texture_name}.dds"
     packed = img.packed_file
     packed_data = packed.data if packed else None
-    if not packed_data:
+    # Generated images have no file; their pixels are written out by the texture compressor below.
+    if not packed_data and not is_generated_image(img):
         texture_path = image_source_path(img)
         if not texture_path.is_file():
             logger.warning(
@@ -128,5 +129,15 @@ def extract_texture_dds_data_source(img: Image, texture_name: str) -> DataSource
         # Embed the packed data or external file directly
         return DataSource.create(packed_data if packed_data else texture_path, texture_name_dds)
 
-    logger.warning(f"Embedded texture '{img.name}' is not in DDS format. Please, convert it to a DDS file.")
+    # Non-DDS source: convert it to DDS if this export has a texture compression session. The
+    # converted file is a temp path that outlives the bundle save; the export operator cleans it up.
+    ctx = current_export_context()
+    session = ctx.textures if ctx is not None else None
+    if session is not None and (dds_path := session.get(img, texture_name)) is not None:
+        return DataSource.create(dds_path, texture_name_dds)
+
+    logger.warning(
+        f"Embedded texture '{img.name}' is not in DDS format. Convert it to a DDS file or enable a "
+        f"texture compressor in Sollumz preferences > Import / Export > Texture Compression."
+    )
     return None

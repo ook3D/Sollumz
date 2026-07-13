@@ -31,6 +31,7 @@ from configparser import ConfigParser
 from pathlib import Path
 from .known_paths import prefs_file_path, data_directory_path
 from .dependencies import IS_SZIO_NATIVE_AVAILABLE, PYMATERIA_REQUIRED_MSG
+from .shared.texture_compressor.properties import SollumzTextureCompressorPrefs
 if TYPE_CHECKING:
     from .iecontext import ImportSettings, ExportSettings
 
@@ -1117,6 +1118,7 @@ class SollumzAddonPreferences(AddonPreferences):
     export_settings: PointerProperty(type=SollumzExportSettings, name="Export Settings")
     import_settings: PointerProperty(type=SollumzImportSettings, name="Import Settings")
     theme: PointerProperty(type=SollumzThemeSettings, name="Theme")
+    texture_compressor: PointerProperty(type=SollumzTextureCompressorPrefs, name="Texture Compression")
 
     tab: EnumProperty(
         items=(
@@ -1463,6 +1465,11 @@ class SollumzAddonPreferences(AddonPreferences):
 
         _section_header(box, "Drawable Dictionary")
         box.prop(settings, "exclude_skeleton")
+
+        _line_separator(layout, factor=3.0)
+        _section_header(layout, "Texture Compression")
+        from .shared.texture_compressor.ui import draw_texture_compressor_prefs
+        draw_texture_compressor_prefs(layout, self.texture_compressor)
 
     def draw_keymap(self, context, layout: UILayout):
         wm = bpy.context.window_manager

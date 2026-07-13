@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "game": "gta5",
+  "category": "texture_compressor_nvtt",
+  "presets": [
+    {
+      "name": "Script Render Target",
+      "data": {
+        "pattern": "script_rt_*",
+        "parameters": "",
+        "args": "--format bgra8 --no-mips",
+        "args_alpha": ""
+      }
+    },
+    {
+      "name": "Normal",
+      "data": {
+        "pattern": "*_n, *_nm, *_nrm, *_normal",
+        "parameters": "BumpSampler, BumpSampler2, BumpSampler_layer0, BumpSampler_layer1, BumpSampler_layer2, BumpSampler_layer3, DirtBumpSampler, PlateBgBumpSampler, FontNormalSampler, DetailNormalSampler, DetailNormal2Sampler, WrinkleSampler_A, WrinkleSampler_B, normalSampler",
+        "args": "--format bc1 --weight-b 0 --bias-b 1 --mips --min-mip-size 4 --mip-filter box --no-mip-gamma-correct --no-mip-pre-alpha",
+        "args_alpha": "--format bc3 --weight-b 0 --bias-b 1 --mips --min-mip-size 4 --mip-filter box --no-mip-gamma-correct --no-mip-pre-alpha"
+      }
+    },
+    {
+      "name": "Specular",
+      "data": {
+        "pattern": "*_s, *_sm, *_spec",
+        "parameters": "SpecSampler, AnisoNoiseSpecSampler",
+        "args": "--format bc1 --mips --min-mip-size 4 --mip-filter box --no-mip-gamma-correct --no-mip-pre-alpha",
+        "args_alpha": "--format bc3 --mips --min-mip-size 4 --mip-filter box --no-mip-gamma-correct --no-mip-pre-alpha"
+      }
+    },
+    {
+      "name": "Detail",
+      "data": {
+        "pattern": "",
+        "parameters": "DetailSampler",
+        "args": "--format bc5 --mips --min-mip-size 4 --mip-filter box --no-mip-gamma-correct --no-mip-pre-alpha",
+        "args_alpha": ""
+      }
+    },
+    {
+      "name": "Tint Palette",
+      "data": {
+        "pattern": "*_pal, *_dpal",
+        "parameters": "TintPaletteSampler, TextureSamplerDiffPal",
+        "args": "--format bgra8 --no-mips",
+        "args_alpha": ""
+      }
+    },
+    {
+      "name": "Distance Map",
+      "data": {
+        "pattern": "",
+        "parameters": "distanceMapSampler",
+        "args": "--format rgba8 --no-mips",
+        "args_alpha": ""
+      }
+    },
+    {
+      "name": "Cable",
+      "data": {
+        "pattern": "",
+        "parameters": "textureSamp",
+        "args": "--format rgba8 --mips --min-mip-size 4 --mip-filter box --no-mip-gamma-correct --no-mip-pre-alpha",
+        "args_alpha": ""
+      }
+    },
+    {
+      "name": "Diffuse",
+      "data": {
+        "pattern": "*_d, *_diff",
+        "parameters": "DiffuseSampler, DiffuseSampler2, DiffuseSampler3, DiffuseExtraSampler, DiffuseHfSampler, PlateBgSampler, TextureSampler_layer0, TextureSampler_layer1, TextureSampler_layer2, TextureSampler_layer3, SnowSampler, SnowSampler0, SnowSampler1, DirtSampler",
+        "args": "--format bc1 --mips --min-mip-size 4 --mip-filter box --no-mip-gamma-correct --no-mip-pre-alpha",
+        "args_alpha": "--format bc3 --mips --min-mip-size 4 --mip-filter box --no-mip-gamma-correct --no-mip-pre-alpha"
+      }
+    },
+    {
+      "name": "Default",
+      "data": {
+        "pattern": "",
+        "parameters": "",
+        "args": "--format bc1 --mips --min-mip-size 4 --mip-filter box --no-mip-gamma-correct --no-mip-pre-alpha",
+        "args_alpha": "--format bc3 --mips --min-mip-size 4 --mip-filter box --no-mip-gamma-correct --no-mip-pre-alpha"
+      }
+    }
+  ]
+}
