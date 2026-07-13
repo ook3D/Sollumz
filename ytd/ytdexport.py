@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import Optional
 
 import bpy
@@ -9,6 +8,7 @@ from szio.types import DataSource
 
 from .. import logger
 from ..iecontext import ExportBundle, export_context
+from ..shared.texture_compressor.imageutils import image_source_path, is_dds_image
 from .properties import TextureDictionary
 
 
@@ -113,30 +113,20 @@ def _drop_first_mip(img: Image, texture_data: DataSource | None) -> DataSource |
 
 def extract_texture_dds_data_source(img: Image, texture_name: str) -> DataSource | None:
     texture_name_dds = f"{texture_name}.dds"
-    texture_data = None
     packed = img.packed_file
-    if packed and (packed_data := packed.data):
-        # Embed packed data
-        if not packed_data.startswith(b"DDS "):
-            logger.warning(
-                f"Embedded texture '{img.name}' packed data is not in DDS format. Please, convert it to a DDS file."
-            )
-        else:
-            texture_data = DataSource.create(packed_data, texture_name_dds)
-    else:
-        # Embed external file
-        texture_path = Path(bpy.path.abspath(img.filepath))
+    packed_data = packed.data if packed else None
+    if not packed_data:
+        texture_path = image_source_path(img)
         if not texture_path.is_file():
             logger.warning(
                 f"Embedded texture '{img.name}' file does not exist and the image is not packed. "
                 f"File path: {texture_path}"
             )
-        elif texture_path.suffix != ".dds":
-            logger.warning(
-                f"Embedded texture '{img.name}' is not in DDS format. Please, convert it to a DDS file."
-                f"File path: {texture_path}"
-            )
-        else:
-            texture_data = DataSource.create(texture_path, texture_name_dds)
+            return None
 
-    return texture_data
+    if is_dds_image(img):
+        # Embed the packed data or external file directly
+        return DataSource.create(packed_data if packed_data else texture_path, texture_name_dds)
+
+    logger.warning(f"Embedded texture '{img.name}' is not in DDS format. Please, convert it to a DDS file.")
+    return None
