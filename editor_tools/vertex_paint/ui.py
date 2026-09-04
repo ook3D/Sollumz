@@ -31,6 +31,9 @@ from .terrain import (
 from .transfer import (
     SOLLUMZ_OT_vertex_paint_transfer_channels,
 )
+from .wind import (
+    SOLLUMZ_OT_bake_wind_vertex_colors,
+)
 from .utils import (
     Channel,
     ChannelWithNoneEnumItems,
@@ -235,6 +238,23 @@ class SOLLUMZ_PT_palette_picker(Panel):
     def draw(self, context):
         layout = self.layout
         layout.operator(SOLLUMZ_OT_vertex_paint_pick_palette_color.bl_idname, text="Pick")
+
+
+class SOLLUMZ_PT_vertex_paint_wind(Panel):
+    bl_idname = "SOLLUMZ_PT_vertex_paint_wind"
+    bl_label = "Tree Shader Baker"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Vertex Paint"
+    bl_context = "vertexpaint"
+    bl_options = {"DEFAULT_CLOSED"}
+    bl_order = 6
+
+    def draw_header(self, context):
+        self.layout.label(text="", icon="FORCE_WIND")
+
+    def draw(self, context):
+        self.layout.operator(SOLLUMZ_OT_bake_wind_vertex_colors.bl_idname, text="Bake Wind Vertex Colors")
 
 
 class SOLLUMZ_MT_vertex_painter_pie_menu(Menu):
