@@ -9,18 +9,16 @@ from dataclasses import dataclass
 
 
 class NavMeshAttr(str, Enum):
-    # Polygons require 4-bytes to represent their attributes.
-    # Even though 'INT' is 4-bytes, we only use the lower 2-bytes of 2 separate mesh attributes in case we need to
-    # access them from shader nodes. Shader nodes cannot use integers and they are converted to 32-bit floats.
-    # Limiting their values to 2-bytes we ensure we don't lose precision in the int -> float conversion.
-    # See mesh_get/set_navmesh_poly_attributes for info on these attributes.
     POLY_DATA_0 = ".navmesh.poly_data0"
     POLY_DATA_1 = ".navmesh.poly_data1"
     POLY_DATA_2 = ".navmesh.poly_data2"
+    POLY_ID = ".navmesh.poly_id"
 
     EDGE_DATA_0 = ".navmesh.edge_data0"
     EDGE_DATA_1 = ".navmesh.edge_data1"
     EDGE_ADJACENT_POLY = ".navmesh.edge_adjacent_poly"
+    EDGE_ORIGINAL_POLY = ".navmesh.edge_original_poly"
+    EDGE_INITIALIZED = ".navmesh.edge_initialized"
 
     @property
     def type(self):
@@ -29,18 +27,17 @@ class NavMeshAttr(str, Enum):
     @property
     def domain(self):
         match self:
-            case NavMeshAttr.POLY_DATA_0 | NavMeshAttr.POLY_DATA_1 | NavMeshAttr.POLY_DATA_2:
+            case NavMeshAttr.POLY_DATA_0 | NavMeshAttr.POLY_DATA_1 | NavMeshAttr.POLY_DATA_2 | NavMeshAttr.POLY_ID:
                 return "FACE"
-            case NavMeshAttr.EDGE_DATA_0 | NavMeshAttr.EDGE_DATA_1 | NavMeshAttr.EDGE_ADJACENT_POLY:
-                # TODO: these should probably be on FACE_CORNER instead, but currently we don't merge vertices so each
-                # polygon has its own edges not shared so should be fine for now
-                return "EDGE"
+            case _ if self.name.startswith("EDGE_"):
+                return "CORNER"
             case _:
                 assert False, f"Domain not set for navmesh attribute '{self}'"
 
 
 def mesh_add_navmesh_attribute(mesh: Mesh, attr: NavMeshAttr):
-    mesh.attributes.new(attr, attr.type, attr.domain)
+    if attr not in mesh.attributes:
+        mesh.attributes.new(attr, attr.type, attr.domain)
 
 
 def mesh_has_navmesh_attribute(mesh: Mesh, attr: NavMeshAttr) -> bool:
@@ -160,9 +157,13 @@ class NavEdgeAttributes:
     data11: int
     adjacent_poly_area: int
     adjacent_poly_index: int
+    original_poly_area: int = 0x3FFF
+    original_poly_index: int = 0x3FFF
 
 
 def mesh_get_navmesh_poly_attributes(mesh: Mesh, poly_idx: int) -> NavPolyAttributes:
+    if poly_idx < 0:
+        return NavPolyAttributes.unpack(0, 0, 0)
     if mesh.is_editmode:
         bm = bmesh.from_edit_mesh(mesh)
         bm.faces.ensure_lookup_table()
@@ -189,18 +190,15 @@ def mesh_get_navmesh_poly_attributes(mesh: Mesh, poly_idx: int) -> NavPolyAttrib
 def mesh_iter_navmesh_all_poly_attributes(mesh: Mesh) -> Iterator[NavPolyAttributes]:
     if mesh.is_editmode:
         bm = bmesh.from_edit_mesh(mesh)
-        try:
-            data0_layer = bm.faces.layers.int[NavMeshAttr.POLY_DATA_0]
-            data1_layer = bm.faces.layers.int[NavMeshAttr.POLY_DATA_1]
-            data2_layer = bm.faces.layers.int[NavMeshAttr.POLY_DATA_2]
+        data0_layer = bm.faces.layers.int[NavMeshAttr.POLY_DATA_0]
+        data1_layer = bm.faces.layers.int[NavMeshAttr.POLY_DATA_1]
+        data2_layer = bm.faces.layers.int[NavMeshAttr.POLY_DATA_2]
 
-            for f in bm.faces:
-                data0 = 0 if data0_layer is None else f[data0_layer]
-                data1 = 0 if data1_layer is None else f[data1_layer]
-                data2 = 0 if data2_layer is None else f[data2_layer]
-                yield NavPolyAttributes.unpack(data0, data1, data2)
-        finally:
-            bm.free()
+        for f in bm.faces:
+            data0 = 0 if data0_layer is None else f[data0_layer]
+            data1 = 0 if data1_layer is None else f[data1_layer]
+            data2 = 0 if data2_layer is None else f[data2_layer]
+            yield NavPolyAttributes.unpack(data0, data1, data2)
     else:
         data0_attr = mesh.attributes.get(NavMeshAttr.POLY_DATA_0, None)
         data1_attr = mesh.attributes.get(NavMeshAttr.POLY_DATA_1, None)
@@ -214,6 +212,8 @@ def mesh_iter_navmesh_all_poly_attributes(mesh: Mesh) -> Iterator[NavPolyAttribu
 
 
 def mesh_set_navmesh_poly_attributes(mesh: Mesh, poly_idx: int, poly_attrs: NavPolyAttributes):
+    if poly_idx < 0:
+        return
     data0, data1, data2 = poly_attrs.pack()
 
     # TODO: add attributes if they don't exist in the mesh
@@ -226,86 +226,87 @@ def mesh_set_navmesh_poly_attributes(mesh: Mesh, poly_idx: int, poly_attrs: NavP
         data2_layer = bm.faces.layers.int[NavMeshAttr.POLY_DATA_2]
 
         if data0_layer is not None:
-            bm.faces[poly_idx][data0_layer] = data0
+            bm.faces[poly_idx][data0_layer] = data0 | (bm.faces[poly_idx][data0_layer] & 0x1030)
         if data1_layer is not None:
             bm.faces[poly_idx][data1_layer] = data1
         if data2_layer is not None:
-            bm.faces[poly_idx][data2_layer] = data2
+            bm.faces[poly_idx][data2_layer] = data2 | (bm.faces[poly_idx][data2_layer] & ~1)
     else:
         data0_attr = mesh.attributes.get(NavMeshAttr.POLY_DATA_0, None)
         data1_attr = mesh.attributes.get(NavMeshAttr.POLY_DATA_1, None)
         data2_attr = mesh.attributes.get(NavMeshAttr.POLY_DATA_2, None)
 
         if data0_attr is not None:
-            data0_attr.data[poly_idx].value = data0
+            data0_attr.data[poly_idx].value = data0 | (data0_attr.data[poly_idx].value & 0x1030)
         if data1_attr is not None:
             data1_attr.data[poly_idx].value = data1
         if data2_attr is not None:
-            data2_attr.data[poly_idx].value = data2
+            data2_attr.data[poly_idx].value = data2 | (data2_attr.data[poly_idx].value & ~1)
+
+
+def signed_int(value: int) -> int:
+    """Blender's INT attributes are signed; XML packed words are unsigned."""
+    value &= 0xFFFFFFFF
+    return value if value < 0x80000000 else value - 0x100000000
+
+
+def _edge_corners(mesh, edge_idx):
+    if mesh.is_editmode:
+        bm = bmesh.from_edit_mesh(mesh)
+        bm.edges.ensure_lookup_table()
+        if not 0 <= edge_idx < len(bm.edges):
+            return []
+        loops = list(bm.edges[edge_idx].link_loops)
+        active = bm.faces.active
+        return sorted(loops, key=lambda loop: loop.face != active)
+    return [loop.index for loop in mesh.loops if loop.edge_index == edge_idx]
 
 
 def mesh_get_navmesh_edge_attributes(mesh: Mesh, edge_idx: int) -> NavEdgeAttributes:
-    if mesh.is_editmode:
-        bm = bmesh.from_edit_mesh(mesh)
-        bm.edges.ensure_lookup_table()
-
-        data0_layer = bm.edges.layers.int[NavMeshAttr.EDGE_DATA_0]
-        data1_layer = bm.edges.layers.int[NavMeshAttr.EDGE_DATA_1]
-        adj_poly_layer = bm.edges.layers.int[NavMeshAttr.EDGE_ADJACENT_POLY]
-
-        data0 = 0 if data0_layer is None else bm.edges[edge_idx][data0_layer]
-        data1 = 0 if data1_layer is None else bm.edges[edge_idx][data1_layer]
-        adj_poly = 0 if adj_poly_layer is None else bm.edges[edge_idx][adj_poly_layer]
-    else:
-        data0_attr = mesh.attributes.get(NavMeshAttr.EDGE_DATA_0, None)
-        data1_attr = mesh.attributes.get(NavMeshAttr.EDGE_DATA_1, None)
-        adj_poly_attr = mesh.attributes.get(NavMeshAttr.EDGE_ADJACENT_POLY, None)
-
-        data0 = 0 if data0_attr is None else data0_attr.data[edge_idx].value
-        data1 = 0 if data1_attr is None else data1_attr.data[edge_idx].value
-        adj_poly = 0 if adj_poly_attr is None else adj_poly_attr.data[edge_idx].value
-
-    return NavEdgeAttributes(
-        data00=data0 & 0xFFFF,
-        data01=(data0 >> 16) & 0xFFFF,
-        data10=data1 & 0xFFFF,
-        data11=(data1 >> 16) & 0xFFFF,
-        adjacent_poly_area=adj_poly & 0xFFFF,
-        adjacent_poly_index=(adj_poly >> 16) & 0xFFFF,
-    )
+    corners = _edge_corners(mesh, edge_idx)
+    def read(attr, default=0):
+        if not corners:
+            return default
+        if mesh.is_editmode:
+            bm = bmesh.from_edit_mesh(mesh)
+            layer = bm.loops.layers.int.get(attr)
+            return corners[0][layer] if layer else default
+        data = mesh.attributes.get(attr)
+        return data.data[corners[0]].value if data and data.domain == "CORNER" else default
+    data0, data1 = read(NavMeshAttr.EDGE_DATA_0), read(NavMeshAttr.EDGE_DATA_1)
+    adjacent = read(NavMeshAttr.EDGE_ADJACENT_POLY, 0x3FFF3FFF)
+    original = read(NavMeshAttr.EDGE_ORIGINAL_POLY, adjacent)
+    return NavEdgeAttributes(data0 & 0xFFFF, (data0 >> 16) & 0xFFFF,
+                             data1 & 0xFFFF, (data1 >> 16) & 0xFFFF,
+                             adjacent & 0xFFFF, (adjacent >> 16) & 0xFFFF,
+                             original & 0xFFFF, (original >> 16) & 0xFFFF)
 
 
 def mesh_set_navmesh_edge_attributes(mesh: Mesh, edge_idx: int, edge_attrs: NavEdgeAttributes):
-    data0 = (edge_attrs.data00 & 0xFFFF) | ((edge_attrs.data01 << 16) & 0xFFFF0000)
-    data1 = (edge_attrs.data10 & 0xFFFF) | ((edge_attrs.data11 << 16) & 0xFFFF0000)
-    adj_poly = (edge_attrs.adjacent_poly_area & 0xFFFF) | ((edge_attrs.adjacent_poly_index << 16) & 0xFFFF0000)
-
-    # TODO: add attributes if they don't exist in the mesh
+    values = {
+        NavMeshAttr.EDGE_INITIALIZED: 1,
+        NavMeshAttr.EDGE_DATA_0: edge_attrs.data00 | (edge_attrs.data01 << 16),
+        NavMeshAttr.EDGE_DATA_1: edge_attrs.data10 | (edge_attrs.data11 << 16),
+        NavMeshAttr.EDGE_ADJACENT_POLY: edge_attrs.adjacent_poly_area | (edge_attrs.adjacent_poly_index << 16),
+        NavMeshAttr.EDGE_ORIGINAL_POLY: edge_attrs.original_poly_area | (edge_attrs.original_poly_index << 16),
+    }
+    corners = _edge_corners(mesh, edge_idx)
     if mesh.is_editmode:
         bm = bmesh.from_edit_mesh(mesh)
-        bm.edges.ensure_lookup_table()
-
-        data0_layer = bm.edges.layers.int[NavMeshAttr.EDGE_DATA_0]
-        data1_layer = bm.edges.layers.int[NavMeshAttr.EDGE_DATA_1]
-        adj_poly_layer = bm.edges.layers.int[NavMeshAttr.EDGE_ADJACENT_POLY]
-
-        if data0_layer is not None:
-            bm.edges[edge_idx][data0_layer] = data0
-        if data1_layer is not None:
-            bm.edges[edge_idx][data1_layer] = data1
-        if adj_poly_layer is not None:
-            bm.edges[edge_idx][adj_poly_layer] = adj_poly
+        if corners and corners[0].face == bm.faces.active:
+            corners = corners[:1]
+        for attr, value in values.items():
+            layer = bm.loops.layers.int.get(attr)
+            if layer is None:
+                layer = bm.loops.layers.int.new(attr)
+            for loop in corners:
+                loop[layer] = signed_int(value)
+        bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
     else:
-        data0_attr = mesh.attributes.get(NavMeshAttr.EDGE_DATA_0, None)
-        data1_attr = mesh.attributes.get(NavMeshAttr.EDGE_DATA_1, None)
-        adj_poly_attr = mesh.attributes.get(NavMeshAttr.EDGE_ADJACENT_POLY, None)
-
-        if data0_attr is not None:
-            data0_attr.data[edge_idx].value = data0
-        if data1_attr is not None:
-            data1_attr.data[edge_idx].value = data1
-        if adj_poly_attr is not None:
-            adj_poly_attr.data[edge_idx].value = adj_poly
+        for attr, value in values.items():
+            mesh_add_navmesh_attribute(mesh, attr)
+            for index in corners:
+                mesh.attributes[attr].data[index].value = signed_int(value)
 
 
 #

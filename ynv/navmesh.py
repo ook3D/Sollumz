@@ -1,7 +1,6 @@
 from bpy.types import (
     Object,
     Mesh,
-    MeshPolygon,
 )
 import re
 from collections.abc import Iterator
@@ -37,7 +36,11 @@ def navmesh_is_map(obj: Object) -> bool:
     """Gets whether the object is a navmesh placed in the map grid. We identify map navmeshes by their name, checking if
     it contains a '[123][456]' identifier.
     """
-    return navmesh_is_valid(obj) and _NAVMESH_MAP_NAME_REGEX.match(obj.name)
+    if not navmesh_is_valid(obj):
+        return False
+    if obj.sz_navmesh.area_id >= 0:
+        return obj.sz_navmesh.area_id < 10000
+    return _NAVMESH_MAP_NAME_REGEX.match(obj.name) is not None
 
 
 def navmesh_is_standalone(obj: Object):
@@ -49,6 +52,10 @@ def navmesh_get_grid_cell(obj: Object) -> tuple[int, int]:
     """Gets the cell coordinates of a map navmesh."""
     if not navmesh_is_valid(obj):
         return -1, -1
+
+    if obj.sz_navmesh.area_id >= 0:
+        area = obj.sz_navmesh.area_id
+        return (area % NAVMESH_GRID_SIZE, area // NAVMESH_GRID_SIZE) if area < 10000 else (-1, -1)
 
     match = _NAVMESH_MAP_NAME_REGEX.match(obj.name)
     if not match:
@@ -149,10 +156,16 @@ def navmesh_poly_update_flags(mesh: Mesh, poly_idx: int):
     """"""
     from .navmesh_attributes import mesh_get_navmesh_poly_attributes, mesh_set_navmesh_poly_attributes
 
-    poly = mesh.polygons[poly_idx]
+    if poly_idx < 0:
+        return
     poly_attrs = mesh_get_navmesh_poly_attributes(mesh, poly_idx)
-
-    area = poly.area
+    if mesh.is_editmode:
+        import bmesh
+        bm = bmesh.from_edit_mesh(mesh)
+        bm.faces.ensure_lookup_table()
+        area = bm.faces[poly_idx].calc_area()
+    else:
+        area = mesh.polygons[poly_idx].area
     poly_attrs.is_small = area < NAVMESH_POLY_SMALL_MAX_AREA
     poly_attrs.is_large = area > NAVMESH_POLY_LARGE_MIN_AREA
 

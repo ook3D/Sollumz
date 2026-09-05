@@ -10,7 +10,6 @@ from .navmesh import (
     navmesh_is_valid,
     navmesh_get_grid_cell,
     navmesh_grid_get_cell_bounds,
-    navmesh_grid_get_cell_neighbors,
 )
 
 
@@ -30,7 +29,7 @@ class NavMeshOverlaysDrawHandler:
     def can_draw_anything(self) -> bool:
         context = bpy.context
         wm = context.window_manager
-        if not wm.sz_ui_nav_view_bounds:
+        if not (wm.sz_ui_nav_view_bounds or wm.sz_ui_nav_view_links):
             return False
 
         return True
@@ -44,6 +43,34 @@ class NavMeshOverlaysDrawHandler:
 
         if wm.sz_ui_nav_view_bounds:
             self._draw_grid_bounds()
+        if wm.sz_ui_nav_view_links:
+            self._draw_portal_links()
+
+    def _draw_portal_links(self):
+        from ..sollumz_properties import SollumType
+        coords = []
+        for obj in bpy.context.scene.objects:
+            if obj.sollum_type != SollumType.NAVMESH_LINK or not obj.visible_get():
+                continue
+            target = next((c for c in obj.children if c.sollum_type == SollumType.NAVMESH_LINK_TARGET), None)
+            if target is None:
+                continue
+            start, end = obj.matrix_world.translation, target.matrix_world.translation
+            delta = end - start
+            if delta.length < 1e-6:
+                continue
+            direction = delta.normalized()
+            side = direction.cross(Vector((0, 0, 1)))
+            if side.length < 1e-6:
+                side = direction.cross(Vector((1, 0, 0)))
+            side.normalize()
+            size = min(0.4, delta.length * 0.25)
+            coords.extend((start, end, end, end - direction * size + side * size * 0.5,
+                           end, end - direction * size - side * size * 0.5))
+        if coords:
+            shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+            shader.uniform_float("color", (0.15, 0.9, 0.8, 1.0))
+            gpu_extras.batch.batch_for_shader(shader, "LINES", {"pos": coords}).draw(shader)
 
     def _draw_grid_bounds(self):
         context = bpy.context
@@ -51,7 +78,6 @@ class NavMeshOverlaysDrawHandler:
         self_color_columns = (0.9, 0.45, 0.0, 0.8)
         self_color_walls = (0.8, 0.4, 0.0, 0.25)
         self_color_walls_end = (0.9, 0.45, 0.0, 0.0)
-        neighbor_color_columns = (0.5, 0.5, 0.5, 0.8)
         neighbor_color_walls = (0.5, 0.5, 0.5, 0.25)
         neighbor_color_walls_end = (0.5, 0.5, 0.5, 0.0)
         color_columns = self_color_columns  # neighbor_color_columns if is_neighbor else self_color_columns

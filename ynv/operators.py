@@ -13,7 +13,6 @@ from .navmesh import (
 )
 from .navmesh_attributes import (
     NavPolyAttributes,
-    mesh_get_navmesh_poly_attributes,
     mesh_iter_navmesh_all_poly_attributes,
 )
 from ..tools.blenderhelper import tag_redraw
@@ -37,7 +36,8 @@ class SOLLUMZ_OT_navmesh_polys_update_flags(Operator):
 
             mesh = obj.data
             poly_access = mesh.sz_navmesh_poly_access
-            navmesh_poly_update_flags(mesh, poly_access.active_poly)
+            if poly_access.active_poly >= 0:
+                navmesh_poly_update_flags(mesh, poly_access.active_poly)
             for poly_idx in poly_access.selected_polys:
                 navmesh_poly_update_flags(mesh, poly_idx)
 
@@ -76,7 +76,8 @@ class SOLLUMZ_OT_navmesh_polys_select_similar(Operator):
     @classmethod
     def poll(self, context):
         self.poll_message_set("Must be in Edit Mode.")
-        return context.mode == "EDIT_MESH" and navmesh_is_valid(context.active_object)
+        return (context.mode == "EDIT_MESH" and navmesh_is_valid(context.active_object)
+                and context.active_object.data.sz_navmesh_poly_access.active_poly >= 0)
 
     def execute(self, context: Context):
         aobj = context.active_object
@@ -90,13 +91,11 @@ class SOLLUMZ_OT_navmesh_polys_select_similar(Operator):
             mesh = obj.data
             if mesh.is_editmode:
                 bm = bmesh.from_edit_mesh(mesh)
-                try:
-                    bm.faces.ensure_lookup_table()
-                    for poly_idx, poly_attrs in enumerate(mesh_iter_navmesh_all_poly_attributes(mesh)):
-                        if self._is_similar(poly_attrs, target_poly_attrs, fields_to_consider):
-                            bm.faces[poly_idx].select = True
-                finally:
-                    bm.free()
+                bm.faces.ensure_lookup_table()
+                for poly_idx, poly_attrs in enumerate(mesh_iter_navmesh_all_poly_attributes(mesh)):
+                    if self._is_similar(poly_attrs, target_poly_attrs, fields_to_consider):
+                        bm.faces[poly_idx].select = True
+                bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
             else:
                 polys = mesh.polygons
                 for poly_idx, poly_attrs in enumerate(mesh_iter_navmesh_all_poly_attributes(mesh)):

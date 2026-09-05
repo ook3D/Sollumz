@@ -14,6 +14,7 @@ from bpy.props import (
     FloatVectorProperty,
     EnumProperty,
     PointerProperty,
+    StringProperty,
 )
 import bmesh
 from collections.abc import Iterator
@@ -28,6 +29,14 @@ from .navmesh_attributes import (
     NavEdgeAttributes,
 )
 from . import navmesh_material
+
+
+class NavMeshProps(PropertyGroup):
+    area_id: IntProperty(name="Area ID", default=-1, min=-1, max=10000,
+                         description="Map sector ID, or 10000 for a vehicle navmesh; -1 uses the object name")
+    source_path: StringProperty(name="Source XML", subtype="FILE_PATH")
+    neighbor_directory: StringProperty(name="Neighbour Directory", subtype="DIR_PATH")
+    border_snapshot: StringProperty(options={"HIDDEN"})
 
 
 class NavCoverType(IntEnum):
@@ -84,8 +93,11 @@ NavLinkTypeEnumItems = tuple((enum.name, label, desc, enum.value) for enum, labe
 class NavLinkProps(PropertyGroup):
     link_type: EnumProperty(name="Type", items=NavLinkTypeEnumItems, default=NavLinkType.CLIMB_LADDER.name)
     heading: FloatProperty(name="Heading", subtype="ANGLE", unit="ROTATION")
-    poly_from: IntProperty(name="Poly From")
-    poly_to: IntProperty(name="Poly To")
+    auto_bind: BoolProperty(name="Bind Polygons from Endpoints", default=False,
+                            description="Find the polygon beneath each portal endpoint on export")
+    bind_distance: FloatProperty(name="Binding Distance", default=2.0, min=0.001, subtype="DISTANCE")
+    poly_from: IntProperty(name="Poly From", min=0, max=16382)
+    poly_to: IntProperty(name="Poly To", min=0, max=16382)
 
 
 def _edge_attr_getter(attr_name: str):
@@ -163,7 +175,9 @@ class NavMeshEdgeAccessor(PropertyGroup):
     data10: EdgeIntAttr("Data 1-0", "data10", min=0, max=0xFFFF)
     data11: EdgeIntAttr("Data 1-1", "data11", min=0, max=0xFFFF)
     adjacent_poly_area: EdgeIntAttr("Adjacent Poly Area", "adjacent_poly_area", min=0, max=0xFFFF)
-    adjacent_poly_index: EdgeIntAttr("Adjacent Poly Index", "adjacent_poly_index", min=0, max=0xFFFF)
+    adjacent_poly_index: EdgeIntAttr("Adjacent Poly Index", "adjacent_poly_index", min=0, max=0x3FFF)
+    original_poly_area: EdgeIntAttr("Original Poly Area", "original_poly_area", min=0, max=0x3FFF)
+    original_poly_index: EdgeIntAttr("Original Poly Index", "original_poly_index", min=0, max=0x3FFF)
 
 
 # Helper functions for NavMeshPolyAccessor
@@ -230,9 +244,9 @@ class NavMeshPolyAccessor(PropertyGroup):
         if mesh.is_editmode:
             bm = bmesh.from_edit_mesh(mesh)
             bm.faces.index_update()
-            return bm.faces.active.index
+            return bm.faces.active.index if bm.faces.active else -1
         else:
-            return mesh.polygons.active
+            return mesh.polygons.active if len(mesh.polygons) else -1
 
     @property
     def selected_polys(self) -> Iterator[int]:
@@ -363,12 +377,14 @@ for val in navmesh_material.ALL_VALUES:
 
 
 def register():
+    Object.sz_navmesh = PointerProperty(type=NavMeshProps)
     Object.sz_nav_cover_point = PointerProperty(type=NavCoverPointProps)
     Object.sz_nav_link = PointerProperty(type=NavLinkProps)
     Mesh.sz_navmesh_poly_access = PointerProperty(type=NavMeshPolyAccessor)
     Mesh.sz_navmesh_edge_access = PointerProperty(type=NavMeshEdgeAccessor)
     Mesh.sz_navmesh_poly_render = PointerProperty(type=NavMeshPolyRender)
 
+    WindowManager.sz_ui_nav_view_links = BoolProperty(name="Display Portal Directions", default=True)
     WindowManager.sz_ui_nav_view_bounds = BoolProperty(
         name="Display Grid Bounds", description="Display the navigation mesh map grid bounds on the 3D Viewport",
         default=False
@@ -376,9 +392,11 @@ def register():
 
 
 def unregister():
+    del Object.sz_navmesh
     del Object.sz_nav_cover_point
     del Object.sz_nav_link
     del Mesh.sz_navmesh_poly_access
     del Mesh.sz_navmesh_edge_access
     del Mesh.sz_navmesh_poly_render
+    del WindowManager.sz_ui_nav_view_links
     del WindowManager.sz_ui_nav_view_bounds

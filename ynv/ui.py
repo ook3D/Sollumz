@@ -23,7 +23,10 @@ class SOLLUMZ_PT_NAVMESH_PANEL(Panel):
         return context.active_object is not None and navmesh_is_valid(context.active_object)
 
     def draw(self, context):
-        pass
+        props = context.active_object.sz_navmesh
+        self.layout.prop(props, "area_id")
+        self.layout.prop(props, "neighbor_directory")
+        self.layout.label(text="Imported polygon IDs are preserved on export.")
 
 
 class SOLLUMZ_PT_NAVMESH_POLY_ATTRS_PANEL(bpy.types.Panel):
@@ -47,6 +50,9 @@ class SOLLUMZ_PT_NAVMESH_POLY_ATTRS_PANEL(bpy.types.Panel):
         poly_access = mesh.sz_navmesh_poly_access
 
         active_poly = poly_access.active_poly
+        if active_poly < 0:
+            layout.label(text="Select an active polygon in Edit Mode.")
+            return
         selected_polys = list(poly_access.selected_polys)
         layout.alignment = "RIGHT"
         layout.label(
@@ -115,6 +121,9 @@ class SOLLUMZ_PT_NAVMESH_EDGE_ATTRS_PANEL(bpy.types.Panel):
         navmesh_obj = context.active_object
         mesh = navmesh_obj.data
 
+        if mesh.get("sz_navmesh_schema", 0) != 2:
+            layout.operator("sollumz.navmesh_initialize")
+            return
         edge_access = mesh.sz_navmesh_edge_access
 
         active_edge = edge_access.active_edge
@@ -145,6 +154,9 @@ class SOLLUMZ_PT_NAVMESH_EDGE_ATTRS_PANEL(bpy.types.Panel):
         col = layout.column(align=True)
         col.prop(edge_access, "adjacent_poly_area")
         col.prop(edge_access, "adjacent_poly_index", text="Index")
+        col.prop(edge_access, "original_poly_area")
+        col.prop(edge_access, "original_poly_index", text="Original Index")
+        layout.label(text="In Edit Mode, values apply to the active face side.")
 
 
 class SOLLUMZ_PT_NAVMESH_POLY_RENDER_PANEL(bpy.types.Panel):
@@ -231,7 +243,7 @@ class SOLLUMZ_PT_NAVMESH_LINK_PANEL(Panel):
     def poll(cls, context):
         aobj = context.active_object
         if aobj is None:
-            return True
+            return False
 
         if aobj.sollum_type == SollumType.NAVMESH_LINK:
             return True
@@ -256,8 +268,12 @@ class SOLLUMZ_PT_NAVMESH_LINK_PANEL(Panel):
         link_props = link_obj.sz_nav_link
         layout.prop(link_props, "link_type")
         layout.prop(link_props, "heading")
-        layout.prop(link_props, "poly_from")
-        layout.prop(link_props, "poly_to")
+        layout.prop(link_props, "auto_bind")
+        if link_props.auto_bind:
+            layout.prop(link_props, "bind_distance")
+        else:
+            layout.prop(link_props, "poly_from")
+            layout.prop(link_props, "poly_to")
 
 
 class SOLLUMZ_PT_NAVMESH_TOOL_PANEL(Panel):
@@ -276,6 +292,23 @@ class SOLLUMZ_PT_NAVMESH_TOOL_PANEL(Panel):
         layout = self.layout
         wm = context.window_manager
         layout.prop(wm, "sz_ui_nav_view_bounds")
+        layout.prop(wm, "sz_ui_nav_view_links")
+        layout.operator("sollumz.navmesh_create")
+        layout.operator("sollumz.navmesh_convert")
+        row = layout.row(align=True)
+        row.operator("sollumz.navmesh_create_portal")
+        row.operator("sollumz.navmesh_create_cover")
+        layout.operator("sollumz.navmesh_mark_new")
+        from .authoring import navmesh_parent
+        root = navmesh_parent(context.active_object)
+        if root:
+            layout.prop(root.sz_navmesh, "neighbor_directory")
+        layout.operator("sollumz.navmesh_import_neighbors")
+        layout.operator("sollumz.navmesh_rebuild_links")
+        layout.operator("sollumz.navmesh_validate")
+        layout.operator("sollumz.navmesh_export_set")
+        if root and root.data.get("sz_navmesh_schema", 0) != 2:
+            layout.operator("sollumz.navmesh_initialize")
 
         layout.operator(nav_ops.SOLLUMZ_OT_navmesh_polys_select_similar.bl_idname)
 
