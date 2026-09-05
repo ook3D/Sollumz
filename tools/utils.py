@@ -86,14 +86,7 @@ def get_min_vector_list(vecs: list[Vector]):
     if not vecs:
         return Vector()
 
-    x = []
-    y = []
-    z = []
-    for v in vecs:
-        x.append(v[0])
-        y.append(v[1])
-        z.append(v[2])
-    return Vector((min(x), min(y), min(z)))
+    return Vector(map(min, zip(*vecs)))
 
 
 def get_max_vector_list(vecs: list[Vector]):
@@ -101,14 +94,7 @@ def get_max_vector_list(vecs: list[Vector]):
     if not vecs:
         return Vector()
 
-    x = []
-    y = []
-    z = []
-    for v in vecs:
-        x.append(v[0])
-        y.append(v[1])
-        z.append(v[2])
-    return Vector((max(x), max(y), max(z)))
+    return Vector(map(max, zip(*vecs)))
 
 
 def get_distance_of_vectors(a, b):
@@ -159,21 +145,6 @@ def prop_array_to_vector(prop, size=3):
 def get_filename(filepath: str):
     """Get file name from path without extension."""
     return os.path.basename(filepath).split(".")[0]
-
-
-def np_arr_to_str(arr: NDArray, fmt: str):
-    """Convert numpy array to formatted string (faster than np.savetxt)"""
-    n_fmt_chars = fmt.count('%')
-
-    if arr.ndim == 1 and n_fmt_chars == 1:
-        fmt = ' '.join([fmt] * arr.size)
-    else:
-        if n_fmt_chars == 1:
-            fmt = ' '.join([fmt] * arr.shape[1])
-
-        fmt = '\n'.join([fmt] * arr.shape[0])
-
-    return fmt % tuple(arr.ravel())
 
 
 def get_matrix_without_scale(matrix: Matrix) -> Matrix:

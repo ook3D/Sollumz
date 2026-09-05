@@ -1,8 +1,9 @@
 import bpy
 from bl_ui.space_statusbar import STATUSBAR_HT_header
-from typing import Optional
+from dataclasses import dataclass
+from typing import Iterator, Optional
 
-from .ydr.operators import SOLLUMZ_OT_convert_active_material_to_selected, SOLLUMZ_OT_auto_convert_current_material
+from .ydr.operators.materials import SOLLUMZ_OT_convert_active_material_to_selected, SOLLUMZ_OT_auto_convert_current_material
 from .sollumz_preferences import get_addon_preferences, get_export_settings, get_import_settings, SollumzImportSettings, SollumzExportSettings
 from .sollumz_operators import SOLLUMZ_OT_copy_location, SOLLUMZ_OT_copy_rotation, SOLLUMZ_OT_paste_location, SOLLUMZ_OT_paste_rotation
 from .sollumz_properties import (
@@ -11,6 +12,8 @@ from .sollumz_properties import (
     SOLLUMZ_UI_NAMES,
 )
 from .sollumz_helper import find_sollumz_parent
+from .tools.blenderhelper import tag_redraw_all_areas
+from .tabbed_panels import TabPanel
 from .lods import (
     LODLevel,
     SOLLUMZ_OT_set_lod_level,
@@ -29,9 +32,12 @@ def draw_list_with_add_remove(layout: bpy.types.UILayout, add_operator: str, rem
     list_col = row.column()
     list_col.template_list(*temp_list_args, **temp_list_kwargs)
     side_col = row.column()
-    col = side_col.column(align=True)
-    col.operator(add_operator, text="", icon="ADD")
-    col.operator(remove_operator, text="", icon="REMOVE")
+    if add_operator or remove_operator:
+        col = side_col.column(align=True)
+        if add_operator:
+            col.operator(add_operator, text="", icon="ADD")
+        if remove_operator:
+            col.operator(remove_operator, text="", icon="REMOVE")
 
     return list_col, side_col
 
@@ -92,8 +98,8 @@ class FilterListHelper:
     def _filter_item_name(self, item):
         try:
             name = getattr(item, self.order_by_name_key)
-        except:
-            AttributeError(
+        except AttributeError:
+            raise AttributeError(
                 f"Invalid order_by_name_key for {self.__class__.__name__}! This should be the 'name' attribute for the list item.")
 
         return not self.filter_name or self.filter_name.lower() in name.lower()
@@ -115,7 +121,7 @@ class SollumzFileSettingsPanel:
         sfile = context.space_data
         operator = sfile.active_operator
 
-        return operator.bl_idname == cls.operator_id
+        return operator.bl_idname in cls.operator_id
 
     def draw(self, context):
         layout = self.layout
@@ -132,7 +138,7 @@ class SollumzFileSettingsPanel:
 
 
 class SollumzImportSettingsPanel(SollumzFileSettingsPanel):
-    operator_id = "SOLLUMZ_OT_import_assets"
+    operator_id = {"SOLLUMZ_OT_import_assets"}
 
     def get_settings(self, context: bpy.types.Context):
         return get_import_settings(context)
@@ -142,7 +148,7 @@ class SollumzImportSettingsPanel(SollumzFileSettingsPanel):
 
 
 class SollumzExportSettingsPanel(SollumzFileSettingsPanel):
-    operator_id = "SOLLUMZ_OT_export_assets"
+    operator_id = {"SOLLUMZ_OT_export_assets"}
 
     def get_settings(self, context: bpy.types.Context):
         return get_export_settings(context)
@@ -151,41 +157,120 @@ class SollumzExportSettingsPanel(SollumzFileSettingsPanel):
         ...
 
 
-class SOLLUMZ_PT_import_asset(bpy.types.Panel, SollumzImportSettingsPanel):
-    bl_label = "Import Asset"
-    bl_order = 0
+class SOLLUMZ_PT_import_textures(bpy.types.Panel, SollumzImportSettingsPanel):
+    bl_label = "Textures"
+    bl_order = 1
 
     def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzImportSettings):
-        layout.prop(settings, "import_as_asset")
+        col = layout.column(align=True)
+        col.prop(settings, "textures_mode", text="Mode")
+        if settings.textures_mode == "CUSTOM_DIR":
+            split = col.split(factor=0.4)
+            split.column()
+            split.column().prop(bpy.context.window_manager, "sz_ui_import_textures_extract_custom_directory_wrapper", text="")
+
+    @classmethod
+    def register(cls):
+        def _get(self) -> str:
+            return get_import_settings().textures_extract_custom_directory
+        def _set(self, value: str):
+            get_import_settings().textures_extract_custom_directory = value
+
+        # Wrapper without subtype=DIR_PATH so it doesn't show the "open directory browser" button. Since we are
+        # already in a file dialog, it reports an error saying it cannot open another one. Having this wrapper seems to
+        # be the only way to hide that button.
+        kw = SollumzImportSettings.__bases__[0].__annotations__["textures_extract_custom_directory"].keywords
+        bpy.types.WindowManager.sz_ui_import_textures_extract_custom_directory_wrapper = bpy.props.StringProperty(
+            name=kw["name"],
+            description=kw["description"],
+            get=_get, set=_set,
+        )
+
+    @classmethod
+    def unregister(cls):
+        del bpy.types.WindowManager.sz_ui_import_textures_extract_custom_directory_wrapper
 
 
 class SOLLUMZ_PT_import_fragment(bpy.types.Panel, SollumzImportSettingsPanel):
     bl_label = "Fragment"
-    bl_order = 1
+    bl_order = 2
 
     def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzImportSettings):
         layout.prop(settings, "split_by_group")
+        layout.prop(settings, "frag_import_vehicle_windows")
 
 
 class SOLLUMZ_PT_import_ydd(bpy.types.Panel, SollumzImportSettingsPanel):
     bl_label = "Drawable Dictionary"
-    bl_order = 2
-
-    def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzImportSettings):
-        layout.prop(settings, "import_ext_skeleton")
-
-
-class SOLLUMZ_PT_import_ymap(bpy.types.Panel, SollumzImportSettingsPanel):
-    bl_label = "Ymap"
     bl_order = 3
 
     def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzImportSettings):
-        layout.prop(settings, "ymap_skip_missing_entities")
-        layout.prop(settings, "ymap_exclude_entities")
+        col = layout.column(align=True)
+        col.row(align=True).prop(settings, "dwd_import_external_skeleton", expand=True)
+
+        if settings.dwd_import_external_skeleton == "SAVED":
+            prefs = get_addon_preferences(bpy.context)
+            if prefs.external_skeleton_paths:
+                col.prop_search(
+                    settings, "dwd_import_external_skeleton_saved_path",
+                    prefs, "external_skeleton_paths",
+                    text=" ", icon="ARMATURE_DATA",
+                )
+            else:
+                split = col.split(factor=0.4)
+                row = split.row()
+                row = split.row()
+                row.alert = True
+                row.label(text="No external skeletons saved in preferences.", icon="ERROR")
+
+
+class _SollumzImportYtypPanel(SollumzImportSettingsPanel):
+    bl_label = "Archetype Definitions"
+
+    def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzImportSettings):
+        layout.prop(settings, "ytyp_mlo_instance_entities")
+
+
+class SOLLUMZ_PT_import_ytyp_generic(bpy.types.Panel, _SollumzImportYtypPanel):
+    """Panel with YTYP import settings used in the 'Export RAGE Assets' button."""
+    bl_order = 4
+
+
+class SOLLUMZ_PT_import_ytyp_concrete(bpy.types.Panel, _SollumzImportYtypPanel):
+    """Panel with YMAP import settings used in the 'Import YTYP' button.
+    Same as the generic one but without the header.
+    """
+    operator_id = {"SOLLUMZ_OT_import_ytyp_io"}
+    bl_options = {"HIDE_HEADER"}
+    bl_order = 0
+
+    def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzImportSettings):
+        layout.use_property_split = False
+        super().draw_settings(layout, settings)
+
+class _SollumzImportYmapPanel(SollumzImportSettingsPanel):
+    bl_label = "Maps"
+
+    def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzImportSettings):
         layout.prop(settings, "ymap_instance_entities")
-        layout.prop(settings, "ymap_box_occluders")
-        layout.prop(settings, "ymap_model_occluders")
-        layout.prop(settings, "ymap_car_generators")
+
+
+class SOLLUMZ_PT_import_ymap_generic(bpy.types.Panel, _SollumzImportYmapPanel):
+    """Panel with YMAP import settings used in the 'Export RAGE Assets' button."""
+    bl_order = 5
+
+
+class SOLLUMZ_PT_import_ymap_concrete(bpy.types.Panel, _SollumzImportYmapPanel):
+    """Panel with YMAP import settings used in the 'Import YMAP' button.
+    Same as the generic one but without the header.
+    """
+    operator_id = {"SOLLUMZ_OT_import_ymap", "SOLLUMZ_OT_import_ymap_from_directory"}
+    bl_options = {"HIDE_HEADER"}
+    bl_order = 0
+
+    def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzImportSettings):
+        layout.use_property_split = False
+        super().draw_settings(layout, settings)
 
 
 class SOLLUMZ_PT_export_include(bpy.types.Panel, SollumzExportSettingsPanel):
@@ -203,16 +288,16 @@ class SOLLUMZ_PT_export_drawable(bpy.types.Panel, SollumzExportSettingsPanel):
 
     def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzExportSettings):
         layout.prop(settings, "apply_transforms")
-        layout.prop(settings, "export_with_ytyp")
         layout.prop(settings, "mesh_domain", expand=True)
 
 
-class SOLLUMZ_PT_export_fragment(bpy.types.Panel, SollumzExportSettingsPanel):
-    bl_label = "Fragment"
-    bl_order = 2
-
-    def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzExportSettings):
-        layout.column().prop(settings, "export_lods")
+# Empty for now
+# class SOLLUMZ_PT_export_fragment(bpy.types.Panel, SollumzExportSettingsPanel):
+#     bl_label = "Fragment"
+#     bl_order = 2
+#
+#     def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzExportSettings):
+#         pass
 
 
 # Empty for now
@@ -232,15 +317,142 @@ class SOLLUMZ_PT_export_ydd(bpy.types.Panel, SollumzExportSettingsPanel):
         layout.prop(settings, "exclude_skeleton")
 
 
-class SOLLUMZ_PT_export_ymap(bpy.types.Panel, SollumzExportSettingsPanel):
-    bl_label = "Ymap"
-    bl_order = 5
+class _SollumzExportYtypPanel(SollumzExportSettingsPanel):
+    bl_label = "Archetype Definitions"
 
     def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzExportSettings):
-        layout.prop(settings, "ymap_exclude_entities")
-        layout.prop(settings, "ymap_box_occluders")
-        layout.prop(settings, "ymap_model_occluders")
-        layout.prop(settings, "ymap_car_generators")
+        layout.enabled = self.is_enabled(settings)
+        layout.prop(settings, "export_ytyps_include", text="Include", expand=True)
+        if settings.export_ytyps_include == "SELECTED":
+            from .ytyp.ui.ytyp import SOLLUMZ_UL_YTYP_LIST
+
+            layout.template_list(
+                SOLLUMZ_UL_YTYP_LIST.bl_idname,
+                "",
+                bpy.context.scene, "ytyps",
+                bpy.context.scene, "ytyp_index",
+                rows=3
+            )
+
+        layout.separator()
+        layout.prop(settings, "apply_transforms")
+
+    def is_enabled(self, settings: SollumzExportSettings):
+        return True
+
+
+class SOLLUMZ_PT_export_ytyp_generic(bpy.types.Panel, _SollumzExportYtypPanel):
+    """Panel with YTYP export settings used in the 'Export RAGE Assets' button."""
+    bl_order = 6
+
+    def draw_header(self, context):
+        settings = self.get_settings(context)
+        self.layout.prop(settings, "export_ytyps", text="")
+
+    def is_enabled(self, settings: SollumzExportSettings):
+        return settings.export_ytyps
+
+
+class SOLLUMZ_PT_export_ytyp_concrete(bpy.types.Panel, _SollumzExportYtypPanel):
+    """Panel with YTYP export settings used in the 'Export YTYP' button.
+    Same as the generic one but without the header.
+    """
+    operator_id = {"SOLLUMZ_OT_export_ytyp_io"}
+    bl_options = {"HIDE_HEADER"}
+    bl_order = 0
+
+
+class _SollumzExportYmapPanel(SollumzExportSettingsPanel):
+    bl_label = "Maps"
+
+    def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzExportSettings):
+        layout.enabled = self.is_enabled(settings)
+        layout.prop(settings, "export_ymaps_include", text="Include", expand=True)
+        if settings.export_ymaps_include == "SELECTED":
+            from .shared.multiselection import multiselect_ui_draw_list
+            from .ymap_next.properties.map import get_maps
+            from .ymap_next.ui.map import SOLLUMZ_UL_maps_group_list, SOLLUMZ_MT_maps_group_list_context_menu
+
+            if maps := get_maps(bpy.context):
+                multiselect_ui_draw_list(
+                    layout,
+                    maps.groups,
+                    "",
+                    "",
+                    SOLLUMZ_UL_maps_group_list,
+                    SOLLUMZ_MT_maps_group_list_context_menu,
+                    "tool_panel",
+                )
+
+
+    def is_enabled(self, settings: SollumzExportSettings):
+        return True
+
+
+class SOLLUMZ_PT_export_ymap_generic(bpy.types.Panel, _SollumzExportYmapPanel):
+    """Panel with YMAP export settings used in the 'Export RAGE Assets' button."""
+    bl_order = 7
+
+    def draw_header(self, context):
+        settings = self.get_settings(context)
+        self.layout.prop(settings, "export_ymaps", text="")
+
+    def is_enabled(self, settings: SollumzExportSettings):
+        return settings.export_ymaps
+
+
+class SOLLUMZ_PT_export_ymap_concrete(bpy.types.Panel, _SollumzExportYmapPanel):
+    """Panel with YMAP export settings used in the 'Export YMAP' button.
+    Same as the generic one but without the header.
+    """
+    operator_id = {"SOLLUMZ_OT_export_ymap"}
+    bl_options = {"HIDE_HEADER"}
+    bl_order = 0
+
+
+class _SollumzExportYtdPanel(SollumzExportSettingsPanel):
+    bl_label = "Texture Dictionaries"
+
+    def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzExportSettings):
+        layout.enabled = self.is_enabled(settings)
+        layout.prop(settings, "export_ytds_include", text="Include", expand=True)
+        if settings.export_ytds_include == "SELECTED":
+            from .shared.multiselection import multiselect_ui_draw_list
+            from .ytd.ui import SOLLUMZ_UL_txd_list, SOLLUMZ_MT_txd_list_context_menu
+
+            multiselect_ui_draw_list(
+                layout,
+                bpy.context.scene.sz_txds.texture_dictionaries,
+                "",
+                "",
+                SOLLUMZ_UL_txd_list,
+                SOLLUMZ_MT_txd_list_context_menu,
+                "tool_panel",
+            )
+
+    def is_enabled(self, settings: SollumzExportSettings):
+        return True
+
+
+class SOLLUMZ_PT_export_ytd_generic(bpy.types.Panel, _SollumzExportYtdPanel):
+    """Panel with YTD export settings used in the 'Export RAGE Assets' button."""
+    bl_order = 8
+
+    def draw_header(self, context):
+        settings = self.get_settings(context)
+        self.layout.prop(settings, "export_ytds", text="")
+
+    def is_enabled(self, settings: SollumzExportSettings):
+        return settings.export_ytds
+
+
+class SOLLUMZ_PT_export_ytd_concrete(bpy.types.Panel, _SollumzExportYtdPanel):
+    """Panel with YTD export settings used in the 'Export YTD' button.
+    Same as the generic one but without the header.
+    """
+    operator_id = {"SOLLUMZ_OT_export_ytd"}
+    bl_options = {"HIDE_HEADER"}
+    bl_order = 0
 
 
 class SOLLUMZ_PT_TOOL_PANEL(bpy.types.Panel):
@@ -257,15 +469,13 @@ class SOLLUMZ_PT_TOOL_PANEL(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        row = layout.row()
-        row.operator("sollumz.import_assets")
 
+        row = layout.row()
+        row.operator("sollumz.import_assets", icon="IMPORT")
+        op = row.operator("sollumz.export_assets", icon="EXPORT")
         if context.scene.sollumz_export_path != "":
-            op = row.operator("sollumz.export_assets")
             op.directory = context.scene.sollumz_export_path
             op.direct_export = True
-        else:
-            row.operator("sollumz.export_assets")
 
 
 class GeneralToolChildPanel:
@@ -381,12 +591,6 @@ class SOLLUMZ_PT_VERTEX_TOOL_PANEL(GeneralToolChildPanel, bpy.types.Panel):
     bl_idname = "SOLLUMZ_PT_VERTEX_TOOL_PANEL"
     bl_order = 1
 
-    @classmethod
-    def poll(self, context):
-        preferences = get_addon_preferences(bpy.context)
-        show_panel = preferences.show_vertex_painter
-        return show_panel
-
     def draw_header(self, context):
         self.layout.label(text="", icon="BRUSH_DATA")
 
@@ -442,66 +646,16 @@ class SOLLUMZ_PT_SET_SOLLUM_TYPE_PANEL(GeneralToolChildPanel, bpy.types.Panel):
         row.prop(context.scene, "all_sollum_type", text="")
 
 
-class SOLLUMZ_PT_DEBUG_PANEL(GeneralToolChildPanel, bpy.types.Panel):
-    bl_label = "Debug"
-    bl_idname = "SOLLUMZ_PT_DEBUG_PANEL"
-    bl_order = 4
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon="PREFERENCES")
-
-    def draw(self, context):
-        layout = self.layout
-
-        row = layout.row()
-        row.operator("sollumz.debug_hierarchy")
-        row.prop(context.scene, "debug_sollum_type")
-        row = layout.row()
-        row.operator("sollumz.debug_fix_light_intensity")
-        row.prop(context.scene, "debug_lights_only_selected")
-
-        layout.separator()
-
-        layout.label(text="Migration")
-        layout.operator("sollumz.migratedrawable")
-        layout.label(
-            text="This will join all geometries for each LOD Level into a single object.", icon="ERROR")
-        layout.operator("sollumz.migrateboundgeoms")
-        layout.operator("sollumz.replace_armature_constraints")
-
-
 class SOLLUMZ_PT_EXPORT_PATH_PANEL(GeneralToolChildPanel, bpy.types.Panel):
-    bl_label = "Export path"
+    bl_label = "Export Path"
     bl_idname = "SOLLUMZ_PT_EXPORT_PATH_PANEL"
-    bl_order = 5
+    bl_order = 4
 
     def draw_header(self, context):
         self.layout.label(text="", icon="FILEBROWSER")
 
     def draw(self, context):
         self.layout.prop(context.scene, "sollumz_export_path", text="")
-
-
-class SOLLUMZ_PT_TERRAIN_PAINTER_PANEL(GeneralToolChildPanel, bpy.types.Panel):
-    bl_label = "Terrain Painter"
-    bl_idname = "SOLLUMZ_PT_TERRAIN_PAINTER_PANEL"
-    bl_parent_id = SOLLUMZ_PT_VERTEX_TOOL_PANEL.bl_idname
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon="IMAGE")
-
-    def draw(self, context):
-        layout = self.layout
-        row = layout.row()
-        row.operator("sollumz.paint_tex1")
-        row.operator("sollumz.paint_tex2")
-        row = layout.row()
-        row.operator("sollumz.paint_tex3")
-        row.operator("sollumz.paint_tex4")
-        row = layout.row(align=True)
-        op = row.operator("sollumz.paint_a")
-        op.alpha = context.scene.vert_paint_alpha
-        row.prop(context.scene, "vert_paint_alpha")
 
 
 class SOLLUMZ_PT_OBJECT_PANEL(bpy.types.Panel):
@@ -578,6 +732,14 @@ class SOLLUMZ_PT_MAT_PANEL(bpy.types.Panel):
     def draw_header(self, context):
         icon_manager.icon_label("sollumz_icon", self)
 
+    def draw_header_preset(self, context):
+        from .ydr.gta5.presets.shader import SHADER_PRESET_CATEGORY, SOLLUMZ_PT_shader_presets
+        from .ybn.gta5.presets.collision_material import COLLISION_MATERIAL_PRESET_CATEGORY, SOLLUMZ_PT_collision_material_presets
+        if SHADER_PRESET_CATEGORY.poll(context)[0]:
+            SOLLUMZ_PT_shader_presets.draw_panel_header(self.layout)
+        elif COLLISION_MATERIAL_PRESET_CATEGORY.poll(context)[0]:
+            SOLLUMZ_PT_collision_material_presets.draw_panel_header(self.layout)
+
     def draw(self, context):
         layout = self.layout
 
@@ -599,7 +761,8 @@ class SOLLUMZ_PT_MAT_PANEL(bpy.types.Panel):
             )
 
             row = box.row()
-            row.operator(SOLLUMZ_OT_convert_active_material_to_selected.bl_idname, text="Convert to Selected", icon="FILE_REFRESH")
+            row.operator(SOLLUMZ_OT_convert_active_material_to_selected.bl_idname,
+                         text="Convert to Selected", icon="FILE_REFRESH")
             row.operator(SOLLUMZ_OT_auto_convert_current_material.bl_idname, text="Auto Convert", icon="FILE_REFRESH")
 
             return
@@ -643,6 +806,274 @@ class TimeFlagsPanel(FlagsPanel):
         row.operator(self.clear_operator)
 
 
+class NoVisibilityToggle:
+    """Mixin for panels that get no show/hide toggle and are not listed in Preferences > UI > Panels."""
+    sz_panel_no_visibility_toggle = True
+
+
+def space_type_ui_name(space_type: str) -> str:
+    item = bpy.types.Space.bl_rna.properties["type"].enum_items.get(space_type)
+    return item.name if item is not None else space_type
+
+
+def context_mode_ui_name(context_mode: str) -> str:
+    item = bpy.types.Context.bl_rna.properties["mode"].enum_items.get(context_mode)
+    return item.name if item is not None else context_mode
+
+
+class PanelVisibility:
+    """Show/hide state of the UI panels."""
+
+    @dataclass(frozen=True, slots=True)
+    class Node:
+        panel: type
+        idname: str
+        label: str
+        children: tuple["Node", ...]
+
+    @dataclass(frozen=True, slots=True)
+    class Group:
+        space_type: str
+        region_type: str
+        category: str
+        roots: tuple["Node", ...]
+
+        @property
+        def label(self) -> str:
+            category = self.category
+            if category and category.islower():
+                # bl_context identifiers like "object" or "material"
+                category = category.replace("_", " ").title()
+            space_name = space_type_ui_name(self.space_type)
+            return f"{space_name} › {category}" if category else space_name
+
+    def __init__(self):
+        self._tree: tuple[PanelVisibility.Group, ...] = ()
+        self._original_polls: dict[type, object | None] = {}
+        self._hidden_ids: set[str] = set()
+
+    def is_hidden(self, panel_id: str) -> bool:
+        return panel_id in self._hidden_ids
+
+    @property
+    def has_hidden(self) -> bool:
+        return bool(self._hidden_ids)
+
+    def sync(self, hidden_panels):
+        """Sync the runtime state with the `hidden_panels` preferences collection."""
+        self._hidden_ids.clear()
+        self._hidden_ids.update(entry.name for entry in hidden_panels)
+
+    def set_hidden(self, context, panel_id: str, hidden: bool):
+        prefs = get_addon_preferences(context)
+        prefs.set_panel_hidden(panel_id, hidden)
+        self.sync(prefs.hidden_panels)
+
+    def show_all(self, context):
+        prefs = get_addon_preferences(context)
+        prefs.clear_hidden_panels()
+        self.sync(prefs.hidden_panels)
+
+    def hook_panels(self, classes):
+        """Build the panels tree from `classes` and replace the `poll` of each panel in it with one
+        that also checks whether the user hid the panel before delegating to the original function.
+        """
+        self._tree = self._build_panel_tree(classes)
+        for node in self._iter_nodes():
+            cls = node.panel
+            if cls in self._original_polls:
+                continue  # already wrapped, don't stack wrappers
+
+            assert not getattr(cls, "is_registered", False), (
+                f"Panel '{node.idname}' is already registered. Its poll must be replaced before "
+                f"registration, Blender only calls poll on classes that defined it at registration time."
+            )
+
+            original_bound_poll = getattr(cls, "poll", None)  # resolved through the MRO, bound to cls
+            self._original_polls[cls] = cls.__dict__.get("poll")  # exact descriptor, to restore later
+            cls.poll = classmethod(self._make_poll(node.idname, original_bound_poll))
+
+    def _make_poll(self, panel_id: str, original_poll):
+        def poll(cls, context):
+            if self.is_hidden(panel_id):
+                return False
+            return original_poll(context) if original_poll is not None else True
+        return poll
+
+    def unhook_panels(self):
+        """Restore the original `poll` of every panel hooked by `hook_panels` and drop the tree."""
+        for cls, original_poll in self._original_polls.items():
+            if original_poll is not None:
+                cls.poll = original_poll
+            elif "poll" in cls.__dict__:
+                del cls.poll  # the panel had no own poll, remove ours to fall back to any inherited one
+        self._original_polls.clear()
+        self._tree = ()
+
+    def draw_prefs_section(self, layout: bpy.types.UILayout):
+        """Draw the panels tree with a show/hide toggle on each panel."""
+        row = layout.row()
+        row.label(text="Panels")
+        subrow = row.row()
+        subrow.alignment = "RIGHT"
+        subrow.operator(SOLLUMZ_OT_prefs_show_all_panels.bl_idname, text="   Show All   ", icon="HIDE_OFF")
+
+        box = layout.box()
+        for group in self._tree:
+            if bpy.app.version >= (4, 1, 0):
+                group_idname = f"sollumz_prefs_ui_panels_group_{group.space_type}_{group.region_type}_{group.category}"
+                group_header, group_body = box.panel(group_idname, default_closed=True)
+            else:
+                group_header, group_body = box, box
+            group_header.label(text=group.label)
+            if group_body:
+                for root in group.roots:
+                    self._draw_node(group_body, root, indent=1, parent_hidden=False)
+
+    def _draw_node(self, layout: bpy.types.UILayout, node: Node, indent: int, parent_hidden: bool):
+        row = layout.row(align=True)
+        row.alignment = "LEFT"
+        row.active = not parent_hidden
+        for _ in range(indent):
+            row.label(text="", icon="BLANK1")
+
+        hidden = self.is_hidden(node.idname)
+        row.operator(
+            SOLLUMZ_OT_prefs_toggle_panel_visibility.bl_idname,
+            text=node.label,
+            icon="CHECKBOX_DEHLT" if hidden else "CHECKBOX_HLT",
+            emboss=False,
+        ).panel_id = node.idname
+
+        for child in node.children:
+            self._draw_node(layout, child, indent + 1, parent_hidden or hidden)
+
+    @staticmethod
+    def _panel_idname(panel: type) -> str:
+        return getattr(panel, "bl_idname", None) or panel.__name__
+
+    @staticmethod
+    def _is_visibility_toggleable(panel: type) -> bool:
+        """Whether the user can show/hide this panel."""
+        if getattr(panel, "sz_panel_no_visibility_toggle", False):
+            return False
+
+        if getattr(panel, "bl_space_type", None) == "FILE_BROWSER":
+            # The import/export settings panels
+            return False
+
+        if getattr(panel, "bl_region_type", None) == "HEADER":
+            # Popover panels (e.g. preset panels), opened from a button drawn by other UI, not
+            # persistent panels the user would toggle here
+            return False
+
+        if issubclass(panel, TabPanel):
+            # Tab panels are always part of other parent panel
+            return False
+
+        return True
+
+    def _build_panel_tree(self, classes) -> tuple[Group, ...]:
+        """Build the tree of panels found in `classes`. Panels whose visibility is not
+        user-controlled are removed along with their whole subtree. Groups come out in
+        display order, sorted by display label.
+        """
+        panels = [cls for cls in classes if issubclass(cls, bpy.types.Panel)]
+        by_idname = {self._panel_idname(cls): cls for cls in panels}
+
+        children_by_parent: dict[str, list[type]] = {}
+        root_panels = []
+        for cls in panels:
+            parent_idname = getattr(cls, "bl_parent_id", None)
+            if parent_idname in by_idname:
+                children_by_parent.setdefault(parent_idname, []).append(cls)
+            else:
+                # either a root panel or a child of a panel not defined by us
+                root_panels.append(cls)
+
+        def _build_node(cls) -> PanelVisibility.Node | None:
+            if not self._is_visibility_toggleable(cls):
+                return None  # remove the whole subtree
+
+            idname = self._panel_idname(cls)
+            children = tuple(
+                node
+                for child in children_by_parent.get(idname, ())
+                if (node := _build_node(child)) is not None
+            )
+            label = getattr(cls, "bl_label", None) or idname
+            return PanelVisibility.Node(cls, idname, label, children)
+
+        groups = {}
+        for cls in root_panels:
+            node = _build_node(cls)
+            if node is None:
+                continue
+
+            parent_idname = getattr(cls, "bl_parent_id", None)
+            group_cls = (bpy.types.Panel.bl_rna_get_subclass_py(parent_idname) if parent_idname else None) or cls
+            space_type = getattr(group_cls, "bl_space_type", "") or ""
+            region_type = getattr(group_cls, "bl_region_type", "") or ""
+            category = getattr(group_cls, "bl_category", None) or getattr(group_cls, "bl_context", None) or ""
+            groups.setdefault((space_type, region_type, category), []).append(node)
+
+        return tuple(sorted(
+            (
+                PanelVisibility.Group(space_type, region_type, category, tuple(nodes))
+                for (space_type, region_type, category), nodes in groups.items()
+            ),
+            key=lambda group: group.label.casefold(),
+        ))
+
+    def _iter_nodes(self) -> Iterator[Node]:
+        """Flat iteration over every node in the tree."""
+        def _flatten(nodes):
+            for node in nodes:
+                yield node
+                yield from _flatten(node.children)
+
+        for group in self._tree:
+            yield from _flatten(group.roots)
+
+
+_panel_visibility = PanelVisibility()
+
+
+def panel_visibility() -> PanelVisibility:
+    return _panel_visibility
+
+
+class SOLLUMZ_OT_prefs_toggle_panel_visibility(bpy.types.Operator):
+    """Show or hide this panel"""
+    bl_idname = "sollumz.prefs_toggle_panel_visibility"
+    bl_label = "Toggle Panel Visibility"
+    bl_options = {"INTERNAL"}
+
+    panel_id: bpy.props.StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+
+    def execute(self, context):
+        panels = panel_visibility()
+        panels.set_hidden(context, self.panel_id, not panels.is_hidden(self.panel_id))
+        tag_redraw_all_areas(context)
+        return {"FINISHED"}
+
+
+class SOLLUMZ_OT_prefs_show_all_panels(bpy.types.Operator):
+    """Show all panels hidden in the panel list"""
+    bl_idname = "sollumz.prefs_show_all_panels"
+    bl_label = "Show All"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        return panel_visibility().has_hidden
+
+    def execute(self, context):
+        panel_visibility().show_all(context)
+        tag_redraw_all_areas(context)
+        return {"FINISHED"}
+
+
 def statusbar_draw_sollumz_version(header, context):
     from .meta import sollumz_version
     layout = header.layout.row(align=True)
@@ -665,3 +1096,11 @@ def register():
 
 def unregister():
     statusbar_unregister_draw()
+
+
+def pre_register_classes(classes):
+    panel_visibility().hook_panels(classes)
+
+
+def post_unregister_classes():
+    panel_visibility().unhook_panels()

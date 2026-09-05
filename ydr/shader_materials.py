@@ -1,6 +1,6 @@
 from typing import Optional, NamedTuple
 import bpy
-from ..cwxml.shader import (
+from szio.gta5.shader import (
     ShaderManager,
     ShaderDef,
     ShaderParameterType,
@@ -11,8 +11,8 @@ from ..cwxml.shader import (
     ShaderParameterFloat4Def,
     ShaderParameterFloat4x4Def,
 )
-from ..sollumz_properties import MaterialType, MIN_VEHICLE_LIGHT_ID, MAX_VEHICLE_LIGHT_ID
-from ..tools.blenderhelper import find_bsdf_and_material_output
+from ..sollumz_properties import MaterialType, SollumType, MIN_VEHICLE_LIGHT_ID, MAX_VEHICLE_LIGHT_ID
+from ..tools.blenderhelper import find_bsdf_and_material_output, remove_number_suffix
 from ..tools.animationhelper import add_global_anim_uv_nodes
 from ..tools.meshhelper import get_uv_map_name, get_color_attr_name
 from ..shared.shader_nodes import SzShaderNodeParameter, SzShaderNodeParameterDisplayType
@@ -203,23 +203,66 @@ def get_detail_extra_sampler(mat):  # move to blenderhelper.py?
     return None
 
 
+def find_tint_modifiers(obj: bpy.types.Object) -> list[bpy.types.NodesModifier]:
+    modifiers = []
+    for mod in obj.modifiers:
+        if (
+            mod.type == "NODES" and
+            (ng := mod.node_group) and
+            (i := ng.interface) and
+            (t := i.items_tree) and
+            t.get("Color Attribute") and
+            t.get("Palette (Preview)") and
+            t.get("Palette Texture") and
+            t.get("Tint Color")
+        ):
+            modifiers.append(mod)
+
+    return modifiers
+
+
+def apply_tint_preview_index(obj: bpy.types.Object, tint_value: int):
+    if obj.sollum_type in {SollumType.DRAWABLE, SollumType.FRAGMENT}:
+        objs = (
+            child for child in obj.children_recursive
+            if child.type == "MESH" and child.sollum_type == SollumType.DRAWABLE_MODEL
+        )
+    elif obj.type == "MESH":
+        objs = [obj]
+    else:
+        return
+
+    for obj in objs:
+        mods = find_tint_modifiers(obj)
+        if not mods:
+            continue
+
+        for mod in mods:
+            preview_id = mod.node_group.interface.items_tree.get("Palette (Preview)")
+            if not preview_id:
+                continue
+
+            if bpy.app.version >= (5, 2, 0):
+                getattr(mod.properties.inputs, preview_id.identifier).value = tint_value
+            else:
+                mod[preview_id.identifier] = tint_value
+
+        obj.update_tag()
+
+
 def create_tinted_shader_graph(obj: bpy.types.Object):
     attribute_to_remove = []
-    modifiers_to_remove = []
+    modifiers_to_remove = find_tint_modifiers(obj)
 
-    for mod in obj.modifiers:
-        if mod.type == "NODES":
-            for mat in obj.data.materials:
-                tint_node = get_tint_sampler_node(mat)
-                if tint_node is not None:
-                    output_id = mod.node_group.interface.items_tree.get("Tint Color")
-                    if output_id:
-                        attr_name = mod[output_id.identifier + "_attribute_name"]
-                        if attr_name and attr_name in obj.data.attributes:
-                            attribute_to_remove.append(attr_name)
-
-                    modifiers_to_remove.append(mod)
-                    break
+    for mod in modifiers_to_remove:
+        output_id = mod.node_group.interface.items_tree.get("Tint Color")
+        if output_id:
+            if bpy.app.version >= (5, 2, 0):
+                attr_name = getattr(mod.properties.outputs, output_id.identifier).attribute_name
+            else:
+                attr_name = mod[output_id.identifier + "_attribute_name"]
+            if attr_name and attr_name in obj.data.attributes and attr_name not in attribute_to_remove:
+                attribute_to_remove.append(attr_name)
 
     for attr_name in attribute_to_remove:
         obj.data.attributes.remove(obj.data.attributes[attr_name])
@@ -234,10 +277,11 @@ def create_tinted_shader_graph(obj: bpy.types.Object):
 
     for mat in tint_mats:
         tint_sampler_node = get_tint_sampler_node(mat)
-        palette_img = tint_sampler_node.image
 
         if tint_sampler_node is None:
             continue
+
+        palette_img = tint_sampler_node.image
 
         if mat.shader_properties.filename in ShaderManager.tint_colour1_shaders:
             input_color_attr_name = get_color_attr_name(1)
@@ -268,15 +312,21 @@ def create_tint_geom_modifier(
 
     # set input / output variables
     input_id = tnt_ng.interface.items_tree["Color Attribute"].identifier
-    mod[input_id + "_attribute_name"] = input_color_attr_name if input_color_attr_name is not None else ""
-    mod[input_id + "_use_attribute"] = True
-
     input_palette_id = tnt_ng.interface.items_tree["Palette Texture"].identifier
-    mod[input_palette_id] = palette_img
-
     output_id = tnt_ng.interface.items_tree["Tint Color"].identifier
-    mod[output_id + "_attribute_name"] = tint_color_attr_name
-    mod[output_id + "_use_attribute"] = True
+
+    input_color_attr_name = input_color_attr_name if input_color_attr_name is not None else ""
+
+    if bpy.app.version >= (5, 2, 0):
+        getattr(mod.properties.inputs, input_id).value = input_color_attr_name
+        getattr(mod.properties.inputs, input_palette_id).value = palette_img
+        getattr(mod.properties.outputs, output_id).attribute_name = tint_color_attr_name
+    else:
+        mod[input_id] = input_color_attr_name
+        mod[input_palette_id] = palette_img
+        mod[output_id + "_attribute_name"] = tint_color_attr_name
+        mod[output_id + "_use_attribute"] = True
+
 
     return mod
 
@@ -322,7 +372,7 @@ def create_tinted_geometry_graph():  # move to blenderhelper.py?
     # Create the necessary sockets for the node group
     gnt.interface.new_socket("Geometry", socket_type="NodeSocketGeometry", in_out="INPUT")
     gnt.interface.new_socket("Geometry", socket_type="NodeSocketGeometry", in_out="OUTPUT")
-    gnt.interface.new_socket("Color Attribute", socket_type="NodeSocketVector", in_out="INPUT")
+    gnt.interface.new_socket("Color Attribute", socket_type="NodeSocketString", in_out="INPUT")
     in_palette = gnt.interface.new_socket("Palette (Preview)",
                                           description="Index of the tint palette to preview. Has no effect on export",
                                           socket_type="NodeSocketInt", in_out="INPUT")
@@ -354,9 +404,38 @@ def create_tinted_geometry_graph():  # move to blenderhelper.py?
     pal_img_info = gnt.nodes.new("GeometryNodeImageInfo")
     gnt.links.new(input.outputs["Palette Texture"], pal_img_info.inputs["Image"])
 
+    # Read color attribute. We check if there is an isolated attribute for the input color attribute. If so, we
+    # read from the isolated attribute instead of the input, so the tint updates as the user paints.
+    from ..editor_tools.vertex_paint.isolate import ISOLATED_ATTR_FORMAT
+    color_attr = gnt.nodes.new("GeometryNodeInputNamedAttribute")
+    color_attr.data_type = "FLOAT_COLOR"
+    gnt.links.new(input.outputs["Color Attribute"], color_attr.inputs["Name"])
+    last_color_output = color_attr.outputs["Attribute"]
+    for r, g, b in (
+        # All possible isolation states with blue channel. Note: alpha cannot be isolated along with RGB, we can ignore it
+        ("", "", "B"),
+        ("", "G", "B"),
+        ("R", "", "B"),
+        ("R", "G", "B"),
+    ):
+        isolated_attr_prefix = gnt.nodes.new("FunctionNodeInputString")
+        isolated_attr_prefix.string = ISOLATED_ATTR_FORMAT.format(r, g, b, "", "")
+        str_join = gnt.nodes.new("GeometryNodeStringJoin")
+        isolated_attr = gnt.nodes.new("GeometryNodeInputNamedAttribute")
+        isolated_attr.data_type = "FLOAT_COLOR"
+        switch = gnt.nodes.new("GeometryNodeSwitch")
+        switch.input_type = "RGBA"
+        gnt.links.new(input.outputs["Color Attribute"], str_join.inputs["Strings"])
+        gnt.links.new(isolated_attr_prefix.outputs["String"], str_join.inputs["Strings"])
+        gnt.links.new(str_join.outputs["String"], isolated_attr.inputs["Name"])
+        gnt.links.new(isolated_attr.outputs["Exists"], switch.inputs["Switch"])
+        gnt.links.new(isolated_attr.outputs["Attribute"], switch.inputs["True"])
+        gnt.links.new(last_color_output, switch.inputs["False"])
+        last_color_output = switch.outputs["Output"]
+
     # separate colour0
     sepn = gnt.nodes.new("ShaderNodeSeparateXYZ")
-    gnt.links.new(input.outputs["Color Attribute"], sepn.inputs["Vector"])
+    gnt.links.new(last_color_output, sepn.inputs["Vector"])
 
     # create math nodes
     mathns = []
@@ -1034,7 +1113,7 @@ def create_basic_shader_nodes(b: ShaderBuilder):
             decalflag = 2
         elif filename in {"decal_normal_only.sps", "mirror_decal.sps", "reflect_decal.sps"}:
             decalflag = 3
-        elif filename in {"decal_spec_only.sps", "spec_decal.sps"}:
+        elif filename in {"decal_spec_only.sps"}:
             decalflag = 4
         elif filename == "decal_amb_only.sps":
             decalflag = 5
@@ -1150,9 +1229,10 @@ def create_terrain_shader(b: ShaderBuilder):
         mix = node_tree.nodes.new("ShaderNodeMixRGB")
         mixns.append(mix)
 
-    seprgb = node_tree.nodes.new("ShaderNodeSeparateRGB")
+    seprgb = node_tree.nodes.new("ShaderNodeSeparateColor")
+    seprgb.mode = "RGB"
     if shader.is_terrain_mask_only:
-        links.new(tm.outputs[0], seprgb.inputs[0])
+        links.new(tm.outputs[0], seprgb.inputs["Color"])
     else:
         attr_c1 = node_tree.nodes.new("ShaderNodeAttribute")
         attr_c1.attribute_name = get_color_attr_name(1)
@@ -1162,34 +1242,34 @@ def create_terrain_shader(b: ShaderBuilder):
         attr_c0 = node_tree.nodes.new("ShaderNodeAttribute")
         attr_c0.attribute_name = get_color_attr_name(0)
         links.new(attr_c0.outputs[3], mixns[0].inputs[0])
-        links.new(mixns[0].outputs[0], seprgb.inputs[0])
+        links.new(mixns[0].outputs[0], seprgb.inputs["Color"])
 
     # t1 / t2
-    links.new(seprgb.outputs[2], mixns[1].inputs[0])
+    links.new(seprgb.outputs["Blue"], mixns[1].inputs[0])
     links.new(ts1.outputs[0], mixns[1].inputs[1])
     links.new(ts2.outputs[0], mixns[1].inputs[2])
 
     # t3 / t4
-    links.new(seprgb.outputs[2], mixns[2].inputs[0])
+    links.new(seprgb.outputs["Blue"], mixns[2].inputs[0])
     links.new(ts3.outputs[0], mixns[2].inputs[1])
     links.new(ts4.outputs[0], mixns[2].inputs[2])
 
-    links.new(seprgb.outputs[1], mixns[3].inputs[0])
+    links.new(seprgb.outputs["Green"], mixns[3].inputs[0])
     links.new(mixns[1].outputs[0], mixns[3].inputs[1])
     links.new(mixns[2].outputs[0], mixns[3].inputs[2])
 
     links.new(mixns[3].outputs[0], bsdf.inputs["Base Color"])
 
     if bs1:
-        links.new(seprgb.outputs[2], mixns[4].inputs[0])
+        links.new(seprgb.outputs["Blue"], mixns[4].inputs[0])
         links.new(bs1.outputs[0], mixns[4].inputs[1])
         links.new(bs2.outputs[0], mixns[4].inputs[2])
 
-        links.new(seprgb.outputs[2], mixns[5].inputs[0])
+        links.new(seprgb.outputs["Blue"], mixns[5].inputs[0])
         links.new(bs3.outputs[0], mixns[5].inputs[1])
         links.new(bs4.outputs[0], mixns[5].inputs[2])
 
-        links.new(seprgb.outputs[1], mixns[6].inputs[0])
+        links.new(seprgb.outputs["Green"], mixns[6].inputs[0])
         links.new(mixns[4].outputs[0], mixns[6].inputs[1])
         links.new(mixns[5].outputs[0], mixns[6].inputs[2])
 
@@ -1250,10 +1330,10 @@ def create_shader(filename: str, in_place_material: Optional[bpy.types.Material]
         raise AttributeError(f"Shader '{filename}' does not exist!")
 
     filename = shader.filename  # in case `filename` was hashed initially
-    base_name = ShaderManager.find_shader_base_name(filename)
+    base_name = shader.base_name
     material_name = filename.replace(".sps", "")
 
-    if in_place_material and in_place_material.use_nodes:
+    if in_place_material and (in_place_material.use_nodes if bpy.app.version < (5, 0, 0) else True):
         # If creating the shader in an existing material, setup the node tree to its default state
         current_node_tree = in_place_material.node_tree
         current_node_tree.nodes.clear()
@@ -1273,7 +1353,8 @@ def create_shader(filename: str, in_place_material: Optional[bpy.types.Material]
 
     mat = in_place_material or bpy.data.materials.new(material_name)
     mat.sollum_type = MaterialType.SHADER
-    mat.use_nodes = True
+    if bpy.app.version < (5, 0, 0):
+        mat.use_nodes = True
     mat.shader_properties.name = base_name
     mat.shader_properties.filename = filename
     mat.shader_properties.renderbucket = RenderBucket(shader.render_bucket).name
@@ -1310,11 +1391,51 @@ def create_shader(filename: str, in_place_material: Optional[bpy.types.Material]
         if "DirtSampler" in shader.parameter_map:
             add_vehicle_dirt_nodes(builder)
 
+    if shader.filename == "grass_batch.sps":
+        add_grass_batch_color_nodes(builder)
+
     link_uv_map_nodes_to_textures(builder)
 
     organize_node_tree(builder)
 
     return mat
+
+
+def grass_batch_color_tint() -> expr.ShaderExpr:
+    from ..shared.shader_expr.expr import ColorBlend
+    from ..shared.shader_expr.builtins import (
+        color_attribute,
+        attribute,
+        mix_color,
+        vec,
+    )
+    from ..ymap_next.grass import GrassBatchAttr
+
+    attr_c1 = color_attribute(get_color_attr_name(1))
+    attr_grass_color = attribute(GrassBatchAttr.COLOR_AO)
+
+    placeholder = vec(1.0, 1.0, 1.0)  # will be replaced with the color from the diffuse texture
+
+    # Texture color tinted with grass color. `fac > 0.0` is a workaround to "detect" if the attribute exists and only
+    # apply the tint if it exists. It won't be applied if the actual tint is black, but this shouldn't be too common
+    # for grass colors.
+    tinted = mix_color(placeholder, attr_grass_color.color, attr_grass_color.fac > 0.0, ColorBlend.MULTIPLY)
+
+    # R channel of colour1 determines how much tint is applied
+    final = mix_color(placeholder, tinted, attr_c1.r, ColorBlend.MIX)
+
+    return final
+
+
+def add_grass_batch_color_nodes(builder: ShaderBuilder):
+    shader_expr = grass_batch_color_tint()
+    compiled_shader_expr = compile_expr(builder.material.node_tree, shader_expr)
+
+    orig_base_color = builder.bsdf.inputs["Base Color"].links[0].from_socket
+    # Link mix color nodes
+    builder.node_tree.links.new(orig_base_color, compiled_shader_expr.node.inputs["A"])
+    builder.node_tree.links.new(orig_base_color, compiled_shader_expr.node.inputs["B"].links[0].from_node.inputs["A"])
+    builder.node_tree.links.new(compiled_shader_expr.output, builder.bsdf.inputs["Base Color"])
 
 
 VEHICLE_PREVIEW_NODE_LIGHT_EMISSIVE_TOGGLE = [
@@ -1442,3 +1563,76 @@ def vehicle_body_color() -> expr.ShaderExpr:
     final_body_color = final_paint_layer_color * enable_paint_layer + mat_diffuse_color * (1.0 - enable_paint_layer)
 
     return vec(1.0, 1.0, 1.0) * final_body_color  # this vec(1) will be replaced by the shader base color
+
+
+def get_vehicle_material_paint_layer(mat: bpy.types.Material) -> int:
+    """Get material paint layer (i.e Primary, Secondary) based on the value of matDiffuseColor."""
+    from ..yft.properties import VehiclePaintLayer
+
+    paint_layer_int = VehiclePaintLayer.CUSTOM.value
+    if mat.node_tree is None:
+        return paint_layer_int
+
+    mat_diffuse_color = mat.node_tree.nodes.get("matDiffuseColor", None)
+    if mat_diffuse_color is None:
+        return paint_layer_int
+
+    x = mat_diffuse_color.get("X")
+    if x != 2.0:
+        return paint_layer_int
+
+    y = mat_diffuse_color.get("Y")
+    z = mat_diffuse_color.get("Z")
+
+    if y != z:
+        return paint_layer_int
+
+    for paint_layer in VehiclePaintLayer:
+        if y == paint_layer.value:
+            paint_layer_int = paint_layer.value
+            break
+
+    return paint_layer_int
+
+
+def set_vehicle_material_paint_layer(mat: bpy.types.Material, value_int: int):
+    """Set matDiffuseColor value from paint layer selection."""
+
+    if mat.node_tree is None or not 0 <= value_int <= 7:
+        return
+
+    mat_diffuse_color = mat.node_tree.nodes.get("matDiffuseColor", None)
+    if mat_diffuse_color is None:
+        return
+
+    if value_int == 0:
+        mat_diffuse_color.set_vec3((1.0, 1.0, 1.0))
+        return
+
+    mat_diffuse_color.set("X", 2.0)
+    mat_diffuse_color.set("Y", float(value_int))
+    mat_diffuse_color.set("Z", float(value_int))
+
+
+def update_vehicle_material_paint_name(mat: bpy.types.Material):
+    """Update material name to have [PAINT_LAYER] extension at the end."""
+    from ..yft.properties import VehiclePaintLayer
+
+    def _get_paint_layer_name(_paint_layer: VehiclePaintLayer):
+        if _paint_layer == VehiclePaintLayer.CUSTOM or _paint_layer == VehiclePaintLayer.DEFAULT:
+            return ""
+        return f"[{_paint_layer.ui_label.upper()}]"
+
+    new_name_ext = _get_paint_layer_name(VehiclePaintLayer[mat.sz_paint_layer])
+    mat_base_name = remove_number_suffix(mat.name).strip()
+
+    # Replace existing extension
+    for paint_layer in VehiclePaintLayer:
+        name_ext = _get_paint_layer_name(paint_layer)
+        if name_ext in mat_base_name:
+            mat_base_name = mat_base_name.replace(name_ext, "").strip()
+
+    if new_name_ext:
+        mat.name = f"{mat_base_name} {new_name_ext}"
+    else:
+        mat.name = mat_base_name

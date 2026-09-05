@@ -1,4 +1,4 @@
-from .element import (
+from szio.xml import (
     ElementTree,
     ListProperty,
     TextProperty,

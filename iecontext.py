@@ -1,0 +1,242 @@
+import contextlib
+import shutil
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from enum import Enum, auto
+
+from szio.gta5 import Asset, AssetFormat, AssetTarget, SaveOptions, save_asset
+from szio.types import DataSource
+
+from .ydr.vertex_buffer_builder_domain import VBBuilderDomain
+
+
+class ImportTexturesMode(Enum):
+    PACK = auto()
+    IMPORT_DIR = auto()
+    CUSTOM_DIR = auto()
+
+
+class ImportExternalSkeletonMode(Enum):
+    NO = auto()
+    FROM_DIR = auto()
+    SAVED = auto()
+
+
+@dataclass(slots=True, frozen=True)
+class ImportSettings:
+    import_as_asset: bool
+    """Import to the asset library."""
+    split_by_group: bool
+    """Split each drawable model by vertex group."""
+    mlo_instance_entities: bool
+    """Instance MLO entities when importing a YTYP."""
+    map_instance_entities: bool
+    """Instance map entities when importing a YMAP."""
+    dwd_import_external_skeleton: ImportExternalSkeletonMode = ImportExternalSkeletonMode.NO
+    """How to look for a YFT to use as skeleton when importing a YDD."""
+    dwd_import_external_skeleton_saved_path: Path | None = None
+    frag_import_vehicle_windows: bool = False
+    """Whether to import vehicle windows when importing a YFT."""
+    textures_mode: ImportTexturesMode = ImportTexturesMode.PACK
+    """How to handle imported textures."""
+    textures_extract_custom_directory: Path | None = None
+    """Custom directory for textures when mode is 'CUSTOM_DIR'."""
+
+
+@dataclass(slots=True, frozen=True)
+class ImportContext:
+    """Context of an import operation."""
+
+    asset_name: str
+    asset_target: AssetTarget
+    directory: Path
+    settings: ImportSettings
+
+    @property
+    def textures_extract_directory(self) -> Path | None:
+        """Directory where embedded textures from this asset will be extracted to."""
+        match self.settings.textures_mode:
+            case ImportTexturesMode.IMPORT_DIR:
+                return self.textures_import_directory
+            case ImportTexturesMode.CUSTOM_DIR:
+                custom_dir = self.settings.textures_extract_custom_directory
+                assert custom_dir is not None, "Textures custom directory expected to be set"
+                return custom_dir / self.asset_name
+            case _:
+                return None
+
+    @property
+    def textures_import_directory(self) -> Path:
+        return self.directory / self.asset_name
+
+
+@dataclass(slots=True, frozen=True)
+class ExportBundle:
+    """Result of an export operation.
+    Any output file/asset should be stored in the bundle instead of writing it to disk directly.
+    """
+
+    asset_name: str
+    main_asset: Asset | None
+    """Main asset of the export operation."""
+
+    secondary_assets: tuple[tuple[str, Asset], ...]
+    """Additional assets exported along with the main asset, e.g. _hi.yft or .yld. Tuple of tuples like (suffix, asset)."""
+
+    extra_files: tuple[DataSource, ...]
+    """Additional files to write to a folder with same name as the asset, generally embedded textures."""
+
+    secondary_extra_files: tuple[tuple[str, tuple[DataSource, ...]], ...]
+    """Additional files to write to a folder with same name as the asset with a suffix."""
+
+    def save(self, directory: Path, targets: Sequence[AssetTarget]):
+        """Writes the whole bundle to disk at the specified directory."""
+
+        from .meta import sollumz_version
+
+        options = SaveOptions(
+            gen8_directory=directory / "gen8",
+            gen9_directory=directory / "gen9",
+            tool_metadata=("Sollumz", sollumz_version()),
+        )
+        main_asset = self.main_asset
+        save_asset(main_asset, targets, directory, self.asset_name, options)
+        for suffix, asset in self.secondary_assets:
+            save_asset(asset, targets, directory, self.asset_name + suffix, options)
+
+        # We only use extra_files for embedded textures, which are only really needed for CWXML. Initially, these
+        # were always copied but users requested that this not be done for native format.
+        # If we start using extra_files for something else, we will need to rework this.
+        extra_file_groups = tuple(
+            (suffix, files) for suffix, files in (("", self.extra_files), *self.secondary_extra_files) if files
+        )
+        do_write_extra_files = extra_file_groups and any(t.format == AssetFormat.CWXML for t in targets)
+
+        if do_write_extra_files:
+            if len({t.version for t in targets}) > 1:
+                output_dirs = (options.gen8_directory, options.gen9_directory)
+            else:
+                output_dirs = (directory,)
+
+            for d in output_dirs:
+                for suffix, extra_files in extra_file_groups:
+                    res_directory = d / (self.asset_name + suffix)
+                    for src_data in extra_files:
+                        res_directory.mkdir(exist_ok=True)
+                        dst_file = res_directory / src_data.name
+
+                        if (
+                            (src_file := getattr(src_data, "filepath", None)) and
+                            dst_file.is_file() and
+                            dst_file.samefile(src_file)
+                        ):
+                            # If src_data is a file and paths are the same, no need to copy (and would break otherwise)
+                            continue
+
+                        with src_data.open() as src, dst_file.open("wb") as dst:
+                            shutil.copyfileobj(src, dst)
+
+    def is_valid(self) -> bool:
+        """Checks whether the export operation was successful."""
+        return self.main_asset is not None
+
+    def __bool__(self):
+        return self.is_valid()
+
+
+@dataclass(slots=True)
+class ExportSettings:
+    targets: tuple[AssetTarget, ...]
+    """Target formats to export."""
+    apply_transforms: bool = False
+    exclude_skeleton: bool = False
+    mesh_domain: VBBuilderDomain = VBBuilderDomain.FACE_CORNER
+
+
+@dataclass(slots=True, frozen=True)
+class ExportContext:
+    """Context of an export operation."""
+
+    asset_name: str
+    settings: ExportSettings
+
+    def make_bundle(
+        self,
+        main_asset: Asset | None,
+        /,
+        *secondary_assets: tuple[str, Asset | None],
+        extra_files: Sequence[DataSource | None] = (),
+        secondary_extra_files: Sequence[tuple[str, Sequence[DataSource | None]]] = (),
+        name_override: str | None = None,
+    ) -> ExportBundle:
+        """Creates an `ExportBundle` from the given assets and optional files.
+
+        Args:
+            main_asset: The primary asset produced during export. Can be None if export failed.
+            secondary_assets: Optional secondary assets represented as (suffix, asset) pairs. Only non-None assets will
+                be included in the bundle.
+            extra_files: Additional files to write into a subdirectory named after the asset, typically used for
+                embedded resources like textures.
+            secondary_extra_files: Like `extra_files`, but as (suffix, files) pairs written into a subdirectory named
+                after the asset plus the suffix. Only non-None files will be included in the bundle.
+        """
+        return ExportBundle(
+            name_override or self.asset_name,
+            main_asset,
+            tuple(s for s in secondary_assets if s[1] is not None),
+            tuple(f for f in extra_files if f is not None),
+            tuple(
+                (suffix, files_tuple)
+                for suffix, files in secondary_extra_files
+                if (files_tuple := tuple(f for f in files if f is not None))
+            ),
+        )
+
+
+g_import_context: ImportContext | None = None
+g_export_context: ExportContext | None = None
+
+
+def import_context() -> ImportContext:
+    """Gets the current import context. Raises an error if not in import context."""
+    if g_import_context is None:
+        raise RuntimeError(
+            "No import context! Make sure to use `import_context_scope` before calling import functions."
+        )
+    return g_import_context
+
+
+@contextlib.contextmanager
+def import_context_scope(ctx: ImportContext):
+    """Starts an import context. Returns a context manager."""
+    global g_import_context
+    if g_import_context is not None:
+        raise RuntimeError("Already in import context!")
+    g_import_context = ctx
+    try:
+        yield
+    finally:
+        g_import_context = None
+
+
+def export_context() -> ExportContext:
+    """Gets the current export context. Raises an error if not in export context."""
+    if g_export_context is None:
+        raise RuntimeError(
+            "No export context! Make sure to use `export_context_scope` before calling import functions."
+        )
+    return g_export_context
+
+
+@contextlib.contextmanager
+def export_context_scope(ctx: ExportContext):
+    """Starts an export context. Returns a context manager."""
+    global g_export_context
+    if g_export_context is not None:
+        raise RuntimeError("Already in export context!")
+    g_export_context = ctx
+    try:
+        yield
+    finally:
+        g_export_context = None

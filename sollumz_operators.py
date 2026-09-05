@@ -1,40 +1,42 @@
 import traceback
-import os
-from typing import Optional
 import bpy
+from bpy.types import (
+    Context,
+    Object,
+    PropertyGroup,
+    Operator,
+)
+from bpy.props import (
+    BoolProperty,
+    PointerProperty,
+)
 import time
-from collections import defaultdict
 import re
-from bpy_extras.io_utils import ImportHelper
+from pathlib import Path
+from typing import Literal
 from mathutils import Quaternion
 from .sollumz_helper import SOLLUMZ_OT_base, find_sollumz_parent
-from .sollumz_properties import SollumType, SOLLUMZ_UI_NAMES, BOUND_TYPES, TimeFlagsMixin, ArchetypeType, LODLevel
-from .sollumz_preferences import get_export_settings
-from .cwxml.drawable import YDR, YDD
-from .cwxml.fragment import YFT
-from .cwxml.bound import YBN
-from .cwxml.navmesh import YNV
-from .cwxml.clipdictionary import YCD
-from .cwxml.ytyp import YTYP
-from .cwxml.ymap import YMAP
-from .ydr.ydrimport import import_ydr
-from .ydr.ydrexport import export_ydr
-from .ydd.yddimport import import_ydd
-from .ydd.yddexport import export_ydd
-from .yft.yftimport import import_yft
-from .yft.yftexport import export_yft
-from .ybn.ybnimport import import_ybn
-from .ybn.ybnexport import export_ybn
+from .sollumz_properties import SollumType, SOLLUMZ_UI_NAMES, TimeFlagsMixin
+from .sollumz_preferences import get_addon_preferences, get_import_settings, get_export_settings, ImportSettingsBase, ExportSettingsBase
+from szio.gta5.cwxml import (
+    YNV,
+    YCD,
+    YMAP,
+)
 from .ynv.ynvimport import import_ynv
 from .ynv.ynvexport import export_ynv
 from .ycd.ycdimport import import_ycd
 from .ycd.ycdexport import export_ycd
-from .ymap.ymapimport import import_ymap
-from .ymap.ymapexport import export_ymap
-from .ytyp.ytypimport import import_ytyp
-from .tools.blenderhelper import add_child_of_bone_constraint, get_child_of_pose_bone, apply_terrain_brush_setting_to_current_brush, remove_number_suffix, create_blender_object, join_objects
-from .tools.ytyphelper import ytyp_from_objects
-from .ybn.properties import BoundFlags
+from .ymap.ymapexport import export_ymap as deprecated_export_ymap
+from .tools.blenderhelper import remove_number_suffix
+from .dependencies import IS_SZIO_NATIVE_AVAILABLE, PYMATERIA_REQUIRED_MSG
+from .iecontext import (
+    export_context_scope,
+    ExportContext,
+    ExportBundle,
+    import_context_scope,
+    ImportContext,
+)
 
 from . import logger
 
@@ -49,21 +51,18 @@ class TimedOperator:
         super().__init__(*args, **kwargs)
         self._start: float = 0.0
 
-    def execute(self, context: bpy.types.Context):
+    def execute(self, context: Context):
         self._start = time.time()
         return self.execute_timed(context)
 
-    def execute_timed(self, context: bpy.types.Context):
+    def execute_timed(self, context: Context):
         ...
 
 
-class SOLLUMZ_OT_import_assets(bpy.types.Operator, ImportHelper, TimedOperator):
-    """Import XML files exported by CodeWalker"""
-    bl_idname = "sollumz.import_assets"
-    bl_label = "Import CodeWalker XML"
-    bl_options = {"UNDO"}
+class ImportAssetsOperatorImpl(ImportSettingsBase, TimedOperator):
+    bl_description = "Import RAGE asset files"
 
-    directory: bpy.props.StringProperty(subtype="FILE_PATH", options={"HIDDEN", "SKIP_SAVE"})
+    directory: bpy.props.StringProperty(subtype="DIR_PATH", options={"HIDDEN", "SKIP_SAVE"})
     files: bpy.props.CollectionProperty(
         name="File Path",
         type=bpy.types.OperatorFileListElement,
@@ -71,10 +70,35 @@ class SOLLUMZ_OT_import_assets(bpy.types.Operator, ImportHelper, TimedOperator):
     )
 
     filter_glob: bpy.props.StringProperty(
-        default="".join(f"*{filetype.file_extension};" for filetype in (YDR, YDD, YFT, YBN, YNV, YCD, YMAP, YTYP)),
+        default="".join(f"*{ext};" for ext in (
+            ".ybn", ".ydr", ".ydd", ".yft", ".ytyp", ".ytd",
+            ".ybn.xml", ".ydr.xml", ".ydd.xml", ".yft.xml", ".ytyp.xml", ".ytd.xml", ".ymap.xml", ".ycd.xml", ".ynv.xml"
+        )),
         options={"HIDDEN", "SKIP_SAVE"},
         maxlen=255,
     )
+
+    # These are for scripts that use these operators to override the settings and avoid messing with the user preferences.
+    use_custom_settings: BoolProperty(
+        name="Use Custom Settings",
+        description="Use the settings defined in this operator instead of user preferences",
+        default=False,
+        options={"HIDDEN", "SKIP_SAVE"}
+    )
+
+    import_as_asset: BoolProperty(
+        name="Import To Asset Library",
+        description="Import selected files to the current blend file asset library",
+        default=False,
+        options={"HIDDEN", "SKIP_SAVE"}
+    )
+
+    @classmethod
+    def description(cls, _context, properties) -> str:
+        if properties.import_as_asset:
+            return "Import selected files to the current blend file asset library"
+
+        return cls.bl_description
 
     def draw(self, context):
         pass
@@ -88,46 +112,132 @@ class SOLLUMZ_OT_import_assets(bpy.types.Operator, ImportHelper, TimedOperator):
             self.directory = bpy.path.abspath(self.directory)
 
             filenames = [f.name for f in self.files]
+            filenames, ytd_filenames = self._separate_ytd_filenames(filenames)
+            ytd_filenames = self._dedupe_hi_ytd_filenames(ytd_filenames)
+            ytd_filenames = self._dedupe_hd_txd_filenames(ytd_filenames, filenames)
             filenames, ytyp_filenames = self._separate_ytyp_filenames(filenames)
+            filenames, ymap_filenames = self._separate_ymap_filenames(filenames)
             filenames = self._dedupe_hi_yft_filenames(filenames)
 
+            from pathlib import Path
+            from szio import VPath
+            from szio.gta5 import try_load_asset, AssetType, AssetWithDependencies
+            from .ybn.ybnimport import import_ybn as import_ybn_asset
+            from .ydr.ydrimport import import_ydr as import_ydr_asset, find_ydr_external_dependencies
+            from .ydd.yddimport import import_ydd as import_ydd_asset, find_ydd_external_dependencies
+            from .yft.yftimport import import_yft as import_yft_asset, find_yft_external_dependencies
+            from .ytyp.ytypimport import import_ytyp as import_ytyp_asset
+            from .ytd.ytdimport import import_ytd as import_ytd_asset, find_ytd_external_dependencies
+            from .ymap_next.ymapimport import import_ymap as import_ymap_asset, begin_import_ymap_group, end_import_ymap_group
+
+            prefs_import_settings = self if self.use_custom_settings else get_import_settings()
+            import_settings = prefs_import_settings.to_import_context_settings(import_as_asset=self.import_as_asset)
+
+            directory = Path(self.directory)
+
+            def _import_asset_legacy(filename: str) -> bool:
+                filepath = directory / filename
+                if filename.endswith(YCD.file_extension):
+                    import_ycd(str(filepath))
+                elif filename.endswith(YNV.file_extension):
+                    import_ynv(str(filepath))
+                elif filepath.suffix in {".ycd", ".ynv"}:
+                    logger.warning(
+                        f"Binary resource format '{filepath.suffix}' is not supported yet. "
+                        f"Export them to XML with CodeWalker first."
+                    )
+                else:
+                    return False
+
+                return True
+
+            def _import_asset(filename: str) -> bool:
+                filepath = directory / filename
+
+                try:
+                    if _import_asset_legacy(str(filepath)):
+                        return True
+
+                    if (load_result := try_load_asset(VPath(filepath), return_target=True)) is None:
+                        if not IS_SZIO_NATIVE_AVAILABLE and filepath.suffix in {".ybn", ".ydr", ".ydd", ".yft", ".ytyp", ".ytd", ".ymap"}:
+                            logger.warning(f"Could not import '{filepath}'. {PYMATERIA_REQUIRED_MSG}")
+                        else:
+                            logger.warning(f"Could not import '{filepath}'. Unsupported file format.")
+                        return False
+
+                    asset, asset_target = load_result
+
+                    name = filepath.name
+                    i = name.find('.')
+                    if 0 < i < len(name) - 1:
+                        name = name[:i]
+
+                    # Search asset external dependencies
+                    with import_context_scope(ImportContext(name, asset_target, directory, import_settings)):
+                        match asset.ASSET_TYPE:
+                            case AssetType.DRAWABLE:
+                                asset_with_deps = find_ydr_external_dependencies(asset, name)
+                            case AssetType.DRAWABLE_DICTIONARY:
+                                asset_with_deps = find_ydd_external_dependencies(asset, name)
+                            case AssetType.FRAGMENT:
+                                asset_with_deps = find_yft_external_dependencies(asset, name)
+                            case AssetType.TEXTURE_DICTIONARY:
+                                asset_with_deps = find_ytd_external_dependencies(asset, name)
+                            case _:
+                                asset_with_deps = AssetWithDependencies(name, asset, {})
+
+                        if asset_with_deps is not None:
+                            # find dependencies can potentially change the main asset we are
+                            # exporting, e.g. _hi to non-hi .yft
+                            asset = asset_with_deps.main_asset
+                            name = asset_with_deps.name
+
+                    if asset_with_deps is None:
+                        # Failed to find required dependencies, finder functions should have logged the error already
+                        return False
+
+                    # Import asset into Blender
+                    with import_context_scope(ImportContext(name, asset_target, directory, import_settings)):
+                        match asset.ASSET_TYPE:
+                            case AssetType.BOUND:
+                                import_ybn_asset(asset, name)
+                            case AssetType.DRAWABLE:
+                                import_ydr_asset(asset_with_deps, name)
+                            case AssetType.DRAWABLE_DICTIONARY:
+                                import_ydd_asset(asset_with_deps, name)
+                            case AssetType.FRAGMENT:
+                                import_yft_asset(asset_with_deps, name)
+                            case AssetType.MAP_TYPES:
+                                import_ytyp_asset(asset, name)
+                            case AssetType.TEXTURE_DICTIONARY:
+                                import_ytd_asset(asset_with_deps, name)
+                            case AssetType.MAP_DATA:
+                                import_ymap_asset(asset, name)
+                            case _:
+                                assert False, f"Unsupported asset type '{asset.ASSET_TYPE}'"
+
+                    logger.info(f"Successfully imported '{filepath}'")
+                    return True
+                except:
+                    logger.error(f"Error importing: {filepath} \n {traceback.format_exc()}")
+                    return False
+
+            # Import the .ytds before all the assets to ensure that their images are used
+            for filename in ytd_filenames:
+                _import_asset(filename)
+
             for filename in filenames:
-                filepath = os.path.join(self.directory, filename)
+                _import_asset(filename)
 
-                try:
-
-                    if YDR.file_extension in filepath:
-                        import_ydr(filepath)
-                    elif YDD.file_extension in filepath:
-                        import_ydd(filepath)
-                    elif YFT.file_extension in filepath:
-                        import_yft(filepath)
-                    elif YBN.file_extension in filepath:
-                        import_ybn(filepath)
-                    elif YNV.file_extension in filepath:
-                        import_ynv(filepath)
-                    elif YCD.file_extension in filepath:
-                        import_ycd(filepath)
-                    elif YMAP.file_extension in filepath:
-                        import_ymap(filepath)
-                    else:
-                        continue
-
-                    logger.info(f"Successfully imported '{filepath}'")
-                except:
-                    logger.error(f"Error importing: {filepath} \n {traceback.format_exc()}")
-                    return {"CANCELLED"}
-
-            # Import the .ytyps after all the assets to ensure that the archetypes get linked to their object in case
-            # they are imported together
+            # Import the .ytyps and .ymaps after all the assets to ensure that the archetypes get linked to their object
+            # in case they are imported together
             for filename in ytyp_filenames:
-                filepath = os.path.join(self.directory, filename)
-                try:
-                    import_ytyp(filepath)
-                    logger.info(f"Successfully imported '{filepath}'")
-                except:
-                    logger.error(f"Error importing: {filepath} \n {traceback.format_exc()}")
-                    return {"CANCELLED"}
+                _import_asset(filename)
+
+            begin_import_ymap_group()
+            for filename in ymap_filenames:
+                _import_asset(filename)
+            end_import_ymap_group()
 
             logger.info(f"Imported in {self.time_elapsed} seconds")
             return {"FINISHED"}
@@ -138,33 +248,88 @@ class SOLLUMZ_OT_import_assets(bpy.types.Operator, ImportHelper, TimedOperator):
             # Invoked by the FileHandler below (or a manual operator call, but we don't currently do that).
             return self.execute(context)
 
-        return super().invoke(context, event)
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
 
     def _dedupe_hi_yft_filenames(self, filenames: list[str]) -> list[str]:
-        """If the user selected both a non-hi .yft.xml and its _hi.yft.xml, remove the _hi.yft.xml one to prevent
+        """If the user selected both a non-hi .yft[.xml] and its _hi.yft[.xml], remove the _hi.yft[.xml] one to prevent
         importing the same model twice.
         """
-        return [f for f in filenames if not f.endswith("_hi.yft.xml") or f"{f[:-11]}.yft.xml" not in filenames]
+        return [
+            f for f in filenames
+            if (
+                (not f.endswith("_hi.yft.xml") or (f"{f[:-11]}.yft.xml" not in filenames and f"{f[:-11]}.yft" not in filenames)) and
+                (not f.endswith("_hi.yft") or (
+                    f"{f[:-7]}.yft.xml" not in filenames and f"{f[:-7]}.yft" not in filenames))
+            )
+        ]
+
+    def _dedupe_hi_ytd_filenames(self, filenames: list[str]) -> list[str]:
+        """If the user selected both a base .ytd[.xml] and its +hi.ytd[.xml], remove the +hi.ytd[.xml] one to prevent
+        importing the same texture dictionary twice.
+        """
+        return [
+            f for f in filenames
+            if (
+                (not f.endswith("+hi.ytd.xml") or (
+                    f"{f[:-11]}.ytd.xml" not in filenames and f"{f[:-11]}.ytd" not in filenames)) and
+                (not f.endswith("+hi.ytd") or (
+                    f"{f[:-7]}.ytd.xml" not in filenames and f"{f[:-7]}.ytd" not in filenames))
+            )
+        ]
+
+    def _dedupe_hd_txd_filenames(self, ytd_filenames: list[str], asset_filenames: list[str]) -> list[str]:
+        """If the user selected a model along with its HD textures .ytd[.xml] (e.g. 'foo.ydr' and
+        'foo+hidr.ytd'), remove the HD .ytd so it is not also imported as a standalone texture dictionary.
+        The model import loads it by itself.
+        """
+        def _is_hd_txd_of_selected_asset(f: str) -> bool:
+            base = f.removesuffix(".xml").removesuffix(".ytd")
+            for suffix, asset_exts in (("+hidr", (".ydr",)), ("+hifr", (".yft", "_hi.yft")), ("+hidd", (".ydd",))):
+                if base.endswith(suffix):
+                    name = base.removesuffix(suffix)
+                    return any(f"{name}{e}{x}" in asset_filenames for e in asset_exts for x in ("", ".xml"))
+            return False
+
+        return [f for f in ytd_filenames if not _is_hd_txd_of_selected_asset(f)]
+
+    def _separate_filenames_with_extension(self, ext: str, filenames: list[str]) -> tuple[list[str], list[str]]:
+        """Separate the filenames list into two lists, one with all the assets and another one only with the specified extension."""
+        other_filenames, filenames_with_ext = [], []
+        ext_xml = f"{ext}.xml"
+        for f in filenames:
+            dest = filenames_with_ext if f.endswith(ext) or f.endswith(ext_xml) else other_filenames
+            dest.append(f)
+        return other_filenames, filenames_with_ext
+
+    def _separate_ytd_filenames(self, filenames: list[str]) -> tuple[list[str], list[str]]:
+        """Separate the filenames list into two lists, one with all the assets and another one only with .ytds."""
+        return self._separate_filenames_with_extension(".ytd", filenames)
 
     def _separate_ytyp_filenames(self, filenames: list[str]) -> tuple[list[str], list[str]]:
         """Separate the filenames list into two lists, one with all the assets and another one only with .ytyps."""
-        asset_filenames, ytyp_filenames = [], []
-        for f in filenames:
-            dest = ytyp_filenames if f.endswith(YTYP.file_extension) else asset_filenames
-            dest.append(f)
-        return asset_filenames, ytyp_filenames
+        return self._separate_filenames_with_extension(".ytyp", filenames)
+
+    def _separate_ymap_filenames(self, filenames: list[str]) -> tuple[list[str], list[str]]:
+        """Separate the filenames list into two lists, one with all the assets and another one only with .ymaps."""
+        return self._separate_filenames_with_extension(".ymap", filenames)
+
+
+class SOLLUMZ_OT_import_assets(ImportAssetsOperatorImpl, Operator):
+    """Import RAGE asset files"""
+    bl_idname = "sollumz.import_assets"
+    bl_label = "Import RAGE Assets"
+    bl_options = {"UNDO"}
 
 
 if bpy.app.version >= (4, 1, 0):
     class SOLLUMZ_FH_import(bpy.types.FileHandler):
-        # TODO: needs a new operator if we want to support .ytyp import as well (or also allow the normal import to
-        # import .ytyps)
         bl_idname = "SOLLUMZ_FH_import"
-        bl_label = "File handler for CodeWalker XML import"
+        bl_label = "File handler for RAGE assets import"
         bl_import_operator = SOLLUMZ_OT_import_assets.bl_idname
-        # Supports handling multiple extensions, but doesn't support multi-dot extensions like .yft.xml. Should be fine
-        # because the operator checks the extension, but it is a bit broad.
-        bl_file_extensions = ".xml"
+        # Supports handling multiple extensions, but doesn't support multi-dot extensions like .yft.xml. `.xml` should
+        # be fine because the operator checks the extension, but it is a bit broad.
+        bl_file_extensions = ".ybn;.ydr;.ydd;.yft;.ytyp;.ytd;.ymap;.xml;"
 
         @classmethod
         def poll_drop(cls, context):
@@ -172,10 +337,36 @@ if bpy.app.version >= (4, 1, 0):
             return a is not None and (a.type == "VIEW_3D" or a.type == "OUTLINER")
 
 
-class SOLLUMZ_OT_export_assets(bpy.types.Operator, TimedOperator):
-    """Export CodeWalker XML files"""
-    bl_idname = "sollumz.export_assets"
-    bl_label = "Export CodeWalker XML"
+def _collect_objects_for_export(context, limit_to_selected: bool) -> list[Object]:
+
+    objs = context.scene.objects
+
+    if limit_to_selected:
+        objs = context.view_layer.objects.selected
+
+    return _get_only_parent_objs(objs)
+
+
+def _get_only_parent_objs(objs: list[Object]) -> list[Object]:
+    parent_objs = set()
+    objs = set(objs)
+
+    for obj in objs:
+        parent_obj = find_sollumz_parent(obj)
+
+        if parent_obj is None or parent_obj in parent_objs:
+            continue
+
+        parent_objs.add(parent_obj)
+
+    return list(parent_objs)
+
+
+class ExportAssetsOperatorImpl(ExportSettingsBase, TimedOperator):
+    """Export RAGE asset files"""
+
+    sz_export_types = {"OBJECT", "YTYP", "YMAP", "YTD"}
+    """Types of exports to handle in this operator."""
 
     directory: bpy.props.StringProperty(
         name="Output directory",
@@ -190,8 +381,27 @@ class SOLLUMZ_OT_export_assets(bpy.types.Operator, TimedOperator):
         options={"HIDDEN", "SKIP_SAVE"}
     )
 
+    # These are for scripts that use these operators to override the settings and avoid messing with the user preferences.
+    use_custom_settings: BoolProperty(
+        name="Use Custom Settings",
+        description="Use the settings defined in this operator instead of user preferences",
+        default=False,
+        options={"HIDDEN", "SKIP_SAVE"}
+    )
+
     def draw(self, context):
-        pass
+        prefs = get_addon_preferences(context)
+        export_prefs = prefs.export_settings
+        from szio.gta5 import AssetFormat, is_provider_available
+        row = self.layout.row(align=False)
+        col = row.column(align=True, heading="Format")
+        for f in ("NATIVE", "CWXML"):
+            if is_provider_available(AssetFormat[f]):
+                col.prop_enum(export_prefs, "target_formats", f)
+
+        col = row.column(align=True, heading="Version")
+        for f in ("GEN8", "GEN9"):
+            col.prop_enum(export_prefs, "target_versions", f)
 
     def invoke(self, context, event):
         if self.direct_export:
@@ -200,109 +410,247 @@ class SOLLUMZ_OT_export_assets(bpy.types.Operator, TimedOperator):
             context.window_manager.fileselect_add(self)
             return {"RUNNING_MODAL"}
 
-    def execute_timed(self, context: bpy.types.Context):
+    def execute_timed(self, context: Context):
         with logger.use_operator_logger(self) as op_log:
             logger.info("Starting export...")
-            objs = self.collect_objects(context)
-            export_settings = get_export_settings()
+            prefs_export_settings = self if self.use_custom_settings else get_export_settings()
+            if "OBJECT" in self.sz_export_types:
+                objs = _collect_objects_for_export(context, prefs_export_settings.limit_to_selected)
+            else:
+                objs = []
+
+            if "YTYP" in self.sz_export_types:
+                export_ytyps = (
+                    # only consider prefs in the generic export operator, the concrete one for YTYPs always exports them
+                    (self.sz_export_types == {"YTYP"} or prefs_export_settings.export_ytyps) and
+                    context.scene.ytyps
+                )
+            else:
+                export_ytyps = False
+
+            if "YMAP" in self.sz_export_types:
+                from .ymap_next.properties.map import get_maps
+                export_ymaps = (
+                    # only consider prefs in the generic export operator, the concrete one for YMAPs always exports them
+                    (self.sz_export_types == {"YMAP"} or prefs_export_settings.export_ymaps) and
+                    (maps := get_maps(context)) and maps.groups
+                )
+            else:
+                export_ymaps = False
+
+            if "YTD" in self.sz_export_types:
+                export_ytds = (
+                    # only consider prefs in the generic export operator, the concrete one for YTDs always exports them
+                    (self.sz_export_types == {"YTD"} or prefs_export_settings.export_ytds) and
+                    context.scene.sz_txds.texture_dictionaries
+                )
+            else:
+                export_ytds = False
 
             self.directory = bpy.path.abspath(self.directory)
 
-            if not objs:
-                if export_settings.limit_to_selected:
+            if not objs and not export_ytyps and not export_ymaps and not export_ytds:
+                if prefs_export_settings.limit_to_selected:
                     logger.info("No Sollumz objects selected for export!")
                 else:
                     logger.info("No Sollumz objects in the scene to export!")
                 return {"CANCELLED"}
 
+
+            export_settings = prefs_export_settings.to_export_context_settings()
+            if not export_settings.targets:
+                from szio.gta5 import AssetFormat, AssetVersion, AssetTarget
+                export_settings.targets = (AssetTarget(AssetFormat.CWXML, AssetVersion.GEN8),)
+                logger.warning(
+                    "No export target found. Make sure you select both Format and Version in the export settings. "
+                    "Defaulting to CW XML / Gen 8."
+                )
+
+            directory = Path(self.directory)
             any_warnings_or_errors = False
-            for obj in objs:
-                op_log.clear_log_counts()
-                filepath = None
-                try:
-                    success = False
-                    if obj.sollum_type == SollumType.DRAWABLE:
-                        filepath = self.get_filepath(obj, YDR.file_extension)
-                        success = export_ydr(obj, filepath)
-                    elif obj.sollum_type == SollumType.DRAWABLE_DICTIONARY:
-                        filepath = self.get_filepath(obj, YDD.file_extension)
-                        success = export_ydd(obj, filepath)
-                    elif obj.sollum_type == SollumType.FRAGMENT:
-                        filepath = self.get_filepath(obj, YFT.file_extension)
-                        success = export_yft(obj, filepath)
-                    elif obj.sollum_type == SollumType.CLIP_DICTIONARY:
-                        filepath = self.get_filepath(obj, YCD.file_extension)
-                        success = export_ycd(obj, filepath)
-                    elif obj.sollum_type == SollumType.BOUND_COMPOSITE:
-                        filepath = self.get_filepath(obj, YBN.file_extension)
-                        success = export_ybn(obj, filepath)
-                    elif obj.sollum_type == SollumType.YMAP:
-                        filepath = self.get_filepath(obj, YMAP.file_extension)
-                        success = export_ymap(obj, filepath)
-                    elif obj.sollum_type == SollumType.NAVMESH:
-                        filepath = self.get_filepath(obj, YNV.file_extension)
-                        success = export_ynv(obj, filepath)
-                    else:
-                        continue
 
-                    if success:
-                        if op_log.has_warnings_or_errors:
-                            logger.info(f"Exported '{filepath}' with WARNINGS or ERRORS! Please check the Info Log for details.")
-                            any_warnings_or_errors = True
-                        else:
-                            logger.info(f"Successfully exported '{filepath}'")
-                    else:
-                        if op_log.has_warnings_or_errors:
-                            logger.info(f"Failed to export '{obj.name}', ERRORS found! Please check the Info Log for details.")
-                            any_warnings_or_errors = True
-                except:
-                    logger.error(f"Error exporting: {filepath or obj.name} \n {traceback.format_exc()}")
-                    any_warnings_or_errors = True
-                    return {"CANCELLED"}
+            if objs:
+                any_warnings_or_errors = self._export_objects(objs, directory, export_settings, op_log) or any_warnings_or_errors
 
-            if export_settings.export_with_ytyp:
-                ytyp = ytyp_from_objects(objs)
-                filepath = os.path.join(
-                    self.directory, f"{ytyp.name}.ytyp.xml")
-                ytyp.write_xml(filepath)
-                logger.info(f"Successfully exported '{filepath}' (auto-generated)")
+            if export_ytyps:
+                ytyps = self._collect_ytyps_for_export(context, prefs_export_settings.export_ytyps_include)
+                any_warnings_or_errors = self._export_ytyps(context, ytyps, directory, export_settings, op_log) or any_warnings_or_errors
+
+            if export_ymaps:
+                ymaps = self._collect_ymaps_for_export(context, prefs_export_settings.export_ymaps_include)
+                any_warnings_or_errors = self._export_ymaps(context, ymaps, directory, export_settings, op_log) or any_warnings_or_errors
+
+            if export_ytds:
+                ytds = self._collect_ytds_for_export(context, prefs_export_settings.export_ytds_include)
+                any_warnings_or_errors = self._export_ytds(context, ytds, directory, export_settings, op_log) or any_warnings_or_errors
 
             logger.info(f"Exported in {self.time_elapsed} seconds")
-            if any_warnings_or_errors:
+            if any_warnings_or_errors and bpy.ops.screen.info_log_show.poll():
                 bpy.ops.screen.info_log_show()
             return {"FINISHED"}
 
-    def collect_objects(self, context: bpy.types.Context) -> list[bpy.types.Object]:
-        export_settings = get_export_settings()
+    def _export_objects(self, objs: list[Object], directory: Path, export_settings, op_log) -> bool:
+        from .ybn.ybnexport import export_ybn as export_ybn_asset
+        from .ydr.ydrexport import export_ydr as export_ydr_asset
+        from .ydd.yddexport import export_ydd as export_ydd_asset
+        from .yft.yftexport import export_yft as export_yft_asset
 
-        objs = context.scene.objects
-
-        if export_settings.limit_to_selected:
-            objs = context.selected_objects
-
-        return self.get_only_parent_objs(objs)
-
-    def get_only_parent_objs(self, objs: list[bpy.types.Object]):
-        parent_objs = set()
-        objs = set(objs)
+        any_warnings_or_errors = False
 
         for obj in objs:
-            parent_obj = find_sollumz_parent(obj)
+            op_log.clear_log_counts()
+            try:
+                asset_name = remove_number_suffix(obj.name.lower())
+                export_bundle = None
+                legacy_success = False
+                with export_context_scope(ExportContext(asset_name, export_settings)):
+                    match obj.sollum_type:
+                        case SollumType.BOUND_COMPOSITE:
+                            export_bundle = export_ybn_asset(obj)
+                        case SollumType.DRAWABLE:
+                            export_bundle = export_ydr_asset(obj)
+                        case SollumType.DRAWABLE_DICTIONARY:
+                            export_bundle = export_ydd_asset(obj)
+                        case SollumType.FRAGMENT:
+                            export_bundle = export_yft_asset(obj)
 
-            if parent_obj is None or parent_obj in parent_objs:
-                continue
+                        # These assets are still exported by writing directly to a file instead of through ExportBundle
+                        case SollumType.NAVMESH:
+                            legacy_success = export_ynv(obj, str(directory / (asset_name + YNV.file_extension)))
+                        case SollumType.CLIP_DICTIONARY:
+                            legacy_success = export_ycd(obj, str(directory / (asset_name + YCD.file_extension)))
+                        case SollumType.DEPRECATED__YMAP:
+                            legacy_success = deprecated_export_ymap(obj, str(directory / (asset_name + YMAP.file_extension)))
 
-            parent_objs.add(parent_obj)
-
-        return list(parent_objs)
-
-    def get_filepath(self, obj: bpy.types.Object, extension: str):
-        name = remove_number_suffix(obj.name.lower())
-
-        return os.path.join(self.directory, name + extension)
+                        case _:
+                            assert False, f"Unsupported asset type '{obj.sollum_type}'"
 
 
-class SOLLUMZ_OT_paint_vertices(SOLLUMZ_OT_base, bpy.types.Operator):
+                any_warnings_or_errors = self._save_bundle(obj.name, export_bundle, directory, export_settings, op_log, legacy_success=legacy_success) or any_warnings_or_errors
+            except:
+                logger.error(f"Error exporting: {obj.name} \n {traceback.format_exc()}")
+                any_warnings_or_errors = True
+
+        return any_warnings_or_errors
+
+    def _collect_ytyps_for_export(self, context, include: Literal["ALL", "SELECTED"]) -> list[int]:
+        n = len(context.scene.ytyps)
+        if include == "SELECTED":
+            # no multiselection yet, can only select one
+            idx = context.scene.ytyp_index
+            return [idx] if 0 <= idx < n else []
+        else:
+            return list(range(n))
+
+    def _export_ytyps(self, context, ytyp_indices: list[int], directory: Path, export_settings, op_log) -> bool:
+        from .ytyp.ytypexport import export_ytyp as export_ytyp_asset
+
+        any_warnings_or_errors = False
+
+        for ytyp_index in ytyp_indices:
+            op_log.clear_log_counts()
+            ytyp_name = context.scene.ytyps[ytyp_index].name
+            try:
+                with export_context_scope(ExportContext(ytyp_name, export_settings)):
+                    export_bundle = export_ytyp_asset(context.scene, ytyp_index)
+
+                any_warnings_or_errors = self._save_bundle(ytyp_name, export_bundle, directory, export_settings, op_log) or any_warnings_or_errors
+            except Exception:
+                logger.error(f"Error exporting: {ytyp_name} \n {traceback.format_exc()}")
+                any_warnings_or_errors = True
+
+        return any_warnings_or_errors
+
+    def _collect_ymaps_for_export(self, context, include: Literal["ALL", "SELECTED"]) -> list[int]:
+        from .ymap_next.properties.map import get_maps
+
+        map_groups = get_maps(context).groups
+        if include == "SELECTED":
+            return map_groups.selected_items_indices
+        else:
+            return list(range(len(map_groups)))
+
+    def _export_ymaps(self, context, ymap_indices: list[int], directory: Path, export_settings, op_log) -> bool:
+        from .ymap_next.properties.map import get_maps
+        from .ymap_next.ymapexport import export_ymap as export_ymap_asset
+
+        any_warnings_or_errors = False
+        maps = get_maps(context)
+        for map_group_index in ymap_indices:
+            op_log.clear_log_counts()
+            map_group = maps.groups[map_group_index]
+            try:
+                asset_name = map_group.name.lower()
+                with export_context_scope(ExportContext(asset_name, export_settings)):
+                    export_bundles = export_ymap_asset(map_group)
+
+                any_warnings_or_errors = self._save_bundle(map_group.name, export_bundles, directory, export_settings, op_log) or any_warnings_or_errors
+            except Exception:
+                logger.error(f"Error exporting: {map_group.name} \n {traceback.format_exc()}")
+                any_warnings_or_errors = True
+
+        return any_warnings_or_errors
+
+    def _collect_ytds_for_export(self, context, include: Literal["ALL", "SELECTED"]) -> list[int]:
+        txds = context.scene.sz_txds.texture_dictionaries
+        if include == "SELECTED":
+            return txds.selected_items_indices
+        else:
+            return list(range(len(txds)))
+
+    def _export_ytds(self, context, txd_indices: list[int], directory: Path, export_settings, op_log) -> bool:
+        from .ytd.ytdexport import export_ytd as export_ytd_asset
+
+        any_warnings_or_errors = False
+
+        for txd_index in txd_indices:
+            op_log.clear_log_counts()
+            txd = context.scene.sz_txds.texture_dictionaries[txd_index]
+            try:
+                asset_name = txd.name.lower()
+                with export_context_scope(ExportContext(asset_name, export_settings)):
+                    export_bundle = export_ytd_asset(txd)
+
+                any_warnings_or_errors = self._save_bundle(txd.name, export_bundle, directory, export_settings, op_log) or any_warnings_or_errors
+            except Exception:
+                logger.error(f"Error exporting: {txd.name} \n {traceback.format_exc()}")
+                any_warnings_or_errors = True
+
+        return any_warnings_or_errors
+
+    def _save_bundle(self, name: str, export_bundle: ExportBundle | list[ExportBundle] | None, directory: Path, export_settings, op_log, legacy_success=False) -> bool:
+        any_warnings_or_errors = False
+        export_bundles = export_bundle if isinstance(export_bundle, list) else [export_bundle] if export_bundle else []
+        success = legacy_success or (export_bundles and all(b.is_valid() for b in export_bundles))
+        if success:
+            for b in export_bundles:
+                if b:
+                    b.save(directory, export_settings.targets)
+
+            if op_log.has_warnings_or_errors:
+                logger.info(
+                    f"Exported '{name}' with WARNINGS or ERRORS! Please check the Info Log for details."
+                )
+                any_warnings_or_errors = True
+            else:
+                logger.info(f"Successfully exported '{name}'")
+        else:
+            if op_log.has_warnings_or_errors:
+                logger.info(
+                    f"Failed to export '{name}', ERRORS found! Please check the Info Log for details."
+                )
+                any_warnings_or_errors = True
+
+        return any_warnings_or_errors
+
+
+class SOLLUMZ_OT_export_assets(ExportAssetsOperatorImpl, Operator):
+    """Export RAGE asset files"""
+    bl_idname = "sollumz.export_assets"
+    bl_label = "Export RAGE Assets"
+
+
+class SOLLUMZ_OT_paint_vertices(SOLLUMZ_OT_base, Operator):
     """Paint All Vertices Of Selected Object"""
     bl_idname = "sollumz.paint_vertices"
     bl_label = "Paint"
@@ -346,58 +694,6 @@ class SOLLUMZ_OT_paint_vertices(SOLLUMZ_OT_base, bpy.types.Operator):
         return True
 
 
-class SOLLUMZ_OT_paint_terrain_tex1(SOLLUMZ_OT_base, bpy.types.Operator):
-    """Paint Texture 1 On Selected Object"""
-    bl_idname = "sollumz.paint_tex1"
-    bl_label = "Paint Texture 1"
-
-    def run(self, context):
-        apply_terrain_brush_setting_to_current_brush(1)
-        return True
-
-
-class SOLLUMZ_OT_paint_terrain_tex2(SOLLUMZ_OT_base, bpy.types.Operator):
-    """Paint Texture 2 On Selected Object"""
-    bl_idname = "sollumz.paint_tex2"
-    bl_label = "Paint Texture 2"
-
-    def run(self, context):
-        apply_terrain_brush_setting_to_current_brush(2)
-        return True
-
-
-class SOLLUMZ_OT_paint_terrain_tex3(SOLLUMZ_OT_base, bpy.types.Operator):
-    """Paint Texture 3 On Selected Object"""
-    bl_idname = "sollumz.paint_tex3"
-    bl_label = "Paint Texture 3"
-
-    def run(self, context):
-        apply_terrain_brush_setting_to_current_brush(3)
-        return True
-
-
-class SOLLUMZ_OT_paint_terrain_tex4(SOLLUMZ_OT_base, bpy.types.Operator):
-    """Paint Texture 4 On Selected Object"""
-    bl_idname = "sollumz.paint_tex4"
-    bl_label = "Paint Texture 4"
-
-    def run(self, context):
-        apply_terrain_brush_setting_to_current_brush(4)
-        return True
-
-
-class SOLLUMZ_OT_paint_terrain_alpha(SOLLUMZ_OT_base, bpy.types.Operator):
-    """Paint Lookup Sampler Alpha On Selected Object"""
-    bl_idname = "sollumz.paint_a"
-    bl_label = "Paint Alpha"
-
-    alpha: bpy.props.FloatProperty(name="Alpha", min=-1.0, max=1.0)
-
-    def run(self, context):
-        apply_terrain_brush_setting_to_current_brush(5, self.alpha)
-        return True
-
-
 class SelectTimeFlagsRange(SOLLUMZ_OT_base):
     """Select range of time flags"""
     bl_label = "Select"
@@ -436,7 +732,7 @@ class SelectTimeFlagsRangeMultiSelect(SOLLUMZ_OT_base):
     bl_label = "Select"
 
     def iter_selection_flags(self, context):
-        if False: # empty generator
+        if False:  # empty generator
             yield
 
     def run(self, context):
@@ -472,7 +768,7 @@ class ClearTimeFlagsMultiSelect(SOLLUMZ_OT_base):
     bl_label = "Clear Selection"
 
     def iter_selection_flags(self, context):
-        if False: # empty generator
+        if False:  # empty generator
             yield
 
     def run(self, context):
@@ -482,124 +778,18 @@ class ClearTimeFlagsMultiSelect(SOLLUMZ_OT_base):
         return True
 
 
+_MENU_LABEL = "RAGE Asset (.ydr, .ydd, .yft, .ybn, .ytyp, .ymap, .ycd, .y*.xml)"
+
+
 def sollumz_menu_func_import(self, context):
-    self.layout.operator(SOLLUMZ_OT_import_assets.bl_idname,
-                         text=f"CodeWalker XML({YDR.file_extension}, {YDD.file_extension}, {YFT.file_extension}, {YBN.file_extension}, {YCD.file_extension})")
+    self.layout.operator(SOLLUMZ_OT_import_assets.bl_idname, text=_MENU_LABEL)
 
 
 def sollumz_menu_func_export(self, context):
-    self.layout.operator(SOLLUMZ_OT_export_assets.bl_idname,
-                         text=f"CodeWalker XML({YDR.file_extension}, {YDD.file_extension}, {YFT.file_extension}, {YBN.file_extension}, {YCD.file_extension})")
+    self.layout.operator(SOLLUMZ_OT_export_assets.bl_idname, text=_MENU_LABEL)
 
 
-class SOLLUMZ_OT_debug_hierarchy(bpy.types.Operator):
-    """Debug: Fix incorrect Sollum Type after update. Must set correct type for top-level object first"""
-    bl_idname = "sollumz.debug_hierarchy"
-    bl_label = "Fix Hierarchy"
-    bl_options = {"UNDO"}
-    bl_order = 100
-
-    def execute(self, context):
-        sollum_type = context.scene.debug_sollum_type
-        for obj in context.selected_objects:
-            if len(obj.children) < 1:
-                self.report(
-                    {"INFO"}, f"{obj.name} has no children! Skipping...")
-                continue
-
-            obj.sollum_type = sollum_type
-            if sollum_type == SollumType.DRAWABLE:
-                self.fix_drawable(obj)
-            elif sollum_type == SollumType.DRAWABLE_DICTIONARY:
-                self.fix_drawable_dict(obj)
-            elif sollum_type == SollumType.BOUND_COMPOSITE:
-                self.fix_composite(obj)
-
-        self.report({"INFO"}, "Hierarchy successfuly set.")
-
-        return {"FINISHED"}
-
-    def fix_drawable(self, obj: bpy.types.Object):
-        for model in obj.children:
-            if model.type != "MESH":
-                continue
-
-            model.sollum_type = SollumType.DRAWABLE_MODEL
-
-    def fix_drawable_dict(self, obj: bpy.types.Object):
-        for draw in obj.children:
-            if draw.type != "EMPTY":
-                continue
-
-            draw.sollum_type = SollumType.DRAWABLE
-            self.fix_drawable(draw)
-
-    def fix_composite(self, obj: bpy.types.Object):
-        for bound in obj.children:
-            if bound.type == "EMPTY":
-                if "cloth" in bound.name.lower():
-                    bound.sollum_type = SollumType.BOUND_PLANE
-                    continue
-
-                if "bvh" in bound.name.lower():
-                    bound.sollum_type = SollumType.BOUND_GEOMETRYBVH
-                else:
-                    bound.sollum_type = SollumType.BOUND_GEOMETRY
-                for geom in bound.children:
-                    if geom.type == "MESH":
-                        if "Box" in geom.name:
-                            geom.sollum_type = SollumType.BOUND_POLY_BOX
-                        elif "Sphere" in geom.name:
-                            geom.sollum_type = SollumType.BOUND_POLY_SPHERE
-                        elif "Capsule" in geom.name:
-                            geom.sollum_type = SollumType.BOUND_POLY_CAPSULE
-                        elif "Cylinder" in geom.name:
-                            geom.sollum_type = SollumType.BOUND_POLY_CYLINDER
-                        else:
-                            geom.sollum_type = SollumType.BOUND_POLY_TRIANGLE
-            if bound.type == "MESH":
-                if "box" in bound.name.lower():
-                    bound.sollum_type = SollumType.BOUND_POLY_BOX
-                elif "sphere" in bound.name.lower():
-                    bound.sollum_type = SollumType.BOUND_POLY_SPHERE
-                elif "capsule" in bound.name.lower():
-                    bound.sollum_type = SollumType.BOUND_POLY_CAPSULE
-                elif "cylinder" in bound.name.lower():
-                    bound.sollum_type = SollumType.BOUND_POLY_CYLINDER
-                else:
-                    bound.sollum_type = SollumType.BOUND_POLY_TRIANGLE
-
-
-class SOLLUMZ_OT_debug_fix_light_intensity(bpy.types.Operator):
-    bl_idname = "sollumz.debug_fix_light_intensity"
-    bl_label = "Re-adjust Light Intensity"
-    bl_description = "Multiply light intensity by a factor of 500 to make older projects compatible with the light intensity change"
-    bl_options = {"UNDO"}
-
-    def execute(self, context):
-        only_selected = context.scene.debug_lights_only_selected
-
-        objects = context.selected_objects if only_selected else context.scene.objects
-        light_objs = [obj for obj in objects if obj.type ==
-                      "LIGHT" and obj.sollum_type == SollumType.LIGHT]
-
-        if not light_objs:
-            self.report(
-                {"INFO"}, "No Sollumz lights selected" if only_selected else "No Sollumz lights in the scene.")
-            return {"CANCELLED"}
-
-        lights: list[bpy.types.Light] = []
-        for light_obj in light_objs:
-            if light_obj.data not in lights:
-                lights.append(light_obj.data)
-
-        for light in lights:
-            light.energy = light.energy * 500
-
-        return {"FINISHED"}
-
-
-class SOLLUMZ_OT_copy_location(bpy.types.Operator):
+class SOLLUMZ_OT_copy_location(Operator):
     """Copy the location of an object to the clipboard"""
     bl_idname = "wm.sollumz_copy_location"
     bl_label = ""
@@ -612,7 +802,7 @@ class SOLLUMZ_OT_copy_location(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class SOLLUMZ_OT_copy_rotation(bpy.types.Operator):
+class SOLLUMZ_OT_copy_rotation(Operator):
     """Copy the quaternion rotation of an object to the clipboard"""
     bl_idname = "wm.sollumz_copy_rotation"
     bl_label = ""
@@ -626,10 +816,17 @@ class SOLLUMZ_OT_copy_rotation(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class SOLLUMZ_OT_paste_location(bpy.types.Operator):
+class SOLLUMZ_OT_paste_location(Operator):
     """Paste the location of an object from the clipboard"""
     bl_idname = "wm.sollumz_paste_location"
     bl_label = ""
+
+    @classmethod
+    def poll(cls, context):
+        if context.active_object is None:
+            cls.poll_message_set("No active object selected.")
+            return False
+        return True
 
     def execute(self, context):
         def parse_location_string(location_string):
@@ -640,41 +837,46 @@ class SOLLUMZ_OT_paste_location(bpy.types.Operator):
             else:
                 return None
 
-        location_string = bpy.context.window_manager.clipboard
+        location_string = context.window_manager.clipboard
 
         location = parse_location_string(location_string)
         if location is not None:
-            selected_object = bpy.context.object
-
-            selected_object.location = location
+            context.active_object.location = location
             self.report({'INFO'}, "Location set successfully.")
         else:
             self.report({'ERROR'}, "Invalid location string.")
 
         return {'FINISHED'}
-    
-class SOLLUMZ_OT_paste_rotation(bpy.types.Operator):
+
+
+class SOLLUMZ_OT_paste_rotation(Operator):
     """Paste the rotation (as quaternion) of an object from the clipboard and apply it"""
     bl_idname = "wm.sollumz_paste_rotation"
     bl_label = "Paste Rotation"
 
-    def execute(self, context):
+    @classmethod
+    def poll(cls, context):
+        if context.active_object is None:
+            cls.poll_message_set("No active object selected.")
+            return False
+        return True
 
-        rotation_string = bpy.context.window_manager.clipboard
+    def execute(self, context):
+        rotation_string = context.window_manager.clipboard
 
         rotation_quaternion = parse_rotation_string(rotation_string)
         if rotation_quaternion is not None:
-            selected_object = bpy.context.object
-
-            prev_rotation_mode = selected_object.rotation_mode
-            selected_object.rotation_mode = "QUATERNION"
-            selected_object.rotation_quaternion = rotation_quaternion
-            selected_object.rotation_mode = prev_rotation_mode
+            obj = context.active_object
+            prev_rotation_mode = obj.rotation_mode
+            obj.rotation_mode = "QUATERNION"
+            obj.rotation_quaternion = rotation_quaternion
+            obj.rotation_mode = prev_rotation_mode
 
             self.report({"INFO"}, "Rotation set successfully.")
         else:
             self.report({"ERROR"}, "Invalid rotation quaternion string.")
         return {"FINISHED"}
+
 
 def parse_rotation_string(rotation_string):
     values = rotation_string.split(",")
@@ -690,160 +892,7 @@ def parse_rotation_string(rotation_string):
     return None
 
 
-class SOLLUMZ_OT_debug_migrate_drawable_models(bpy.types.Operator):
-    """Convert old drawable model to use new LOD system"""
-    bl_idname = "sollumz.migratedrawable"
-    bl_label = "Migrate Drawable Model(s)"
-    bl_options = {"UNDO"}
-
-    def execute(self, context):
-        selected_models = [
-            obj for obj in context.selected_objects if obj.sollum_type == SollumType.DRAWABLE_MODEL]
-
-        if not selected_models:
-            self.report({"INFO"}, "No drawable models selected!")
-            return {"CANCELLED"}
-
-        parent = selected_models[0].parent
-
-        models_by_lod: dict[LODLevel,
-                            list[bpy.types.Object]] = defaultdict(list)
-
-        for obj in selected_models:
-            models_by_lod[obj.drawable_model_properties.sollum_lod].extend(
-                obj.children)
-            bpy.data.objects.remove(obj)
-
-        model_obj = create_blender_object(SollumType.DRAWABLE_MODEL)
-        model_lods = model_obj.sz_lods
-        old_mesh = model_obj.data
-
-        for lod_level, geometries in models_by_lod.items():
-
-            if len(geometries) > 1:
-                joined_obj = join_objects(geometries)
-            else:
-                joined_obj = geometries[0]
-
-            model_lods.get_lod(lod_level).mesh = joined_obj.data
-            model_lods.active_lod_level = lod_level
-
-            context.view_layer.objects.active = joined_obj
-            model_obj.select_set(True)
-
-            bpy.ops.object.make_links_data(type='MODIFIERS')
-            bpy.data.objects.remove(joined_obj)
-
-        bpy.data.meshes.remove(old_mesh)
-
-        model_obj.parent = parent
-
-        model_lods.set_highest_lod_active()
-
-        return {"FINISHED"}
-
-
-class SOLLUMZ_OT_debug_migrate_bound_geometries(bpy.types.Operator):
-    """Convert old bound geometries to new hiearchy using shape keys for damaged layers"""
-    bl_idname = "sollumz.migrateboundgeoms"
-    bl_label = "Migrate Bound Geometry(s)"
-    bl_options = {"UNDO"}
-
-    def execute(self, context):
-        selected = [
-            obj for obj in context.selected_objects if obj.sollum_type == SollumType.BOUND_GEOMETRY]
-
-        if not selected:
-            self.report({"INFO"}, "No bound geometries selected!")
-            return {"CANCELLED"}
-
-        for obj in selected:
-            bound_meshes = []
-
-            for child in obj.children:
-                if child.type != "MESH":
-                    continue
-
-                child.data.transform(child.matrix_basis)
-                child.matrix_basis.identity()
-
-                if child.sollum_type == SollumType.BOUND_POLY_TRIANGLE:
-                    bound_meshes.append(child)
-
-            joined_obj = join_objects(bound_meshes)
-            joined_obj.sollum_type = SollumType.BOUND_GEOMETRY
-            joined_obj.name = obj.name
-            joined_obj.parent = obj.parent
-
-            self.set_composite_flags(obj, joined_obj)
-
-            joined_obj.matrix_basis = obj.matrix_basis
-
-            bpy.data.objects.remove(obj)
-
-        return {"FINISHED"}
-
-    def set_composite_flags(self, old_obj: bpy.types.Object, new_obj: bpy.types.Object):
-        def set_flags(prop_name: str):
-            flags_props = getattr(old_obj, prop_name)
-            new_flags_props = getattr(new_obj, prop_name)
-
-            for flag_name in BoundFlags.__annotations__.keys():
-                value = getattr(flags_props, flag_name)
-                setattr(new_flags_props, flag_name, value)
-
-        set_flags("composite_flags1")
-        set_flags("composite_flags2")
-
-
-class SOLLUMZ_OT_debug_replace_armature_constraints(bpy.types.Operator):
-    """Replace the Armature constraints in all selected objects for Child Of constraints (for migrating pre version 0.3 projects)"""
-    bl_idname = "sollumz.replace_armature_constraints"
-    bl_label = "Replace Armature Constraints"
-    bl_options = {"REGISTER", "UNDO"}
-
-    def execute(self, context):
-        if not context.selected_objects:
-            self.report({"INFO"}, "No objects selected!")
-            return {"CANCELLED"}
-
-        for obj in context.selected_objects:
-            constraint = self.get_armature_constraint(obj)
-
-            if constraint is None or not constraint.targets:
-                continue
-
-            target = constraint.targets[0]
-            armature_obj = target.target
-            target_bone = target.subtarget
-
-            obj.constraints.remove(constraint)
-
-            add_child_of_bone_constraint(obj, armature_obj, target_bone)
-            self.set_obj_child_of_bone_inverse(obj)
-
-        return {"FINISHED"}
-
-    @staticmethod
-    def get_armature_constraint(obj: bpy.types.Object) -> Optional[bpy.types.ArmatureConstraint]:
-        for constraint in obj.constraints:
-            if constraint.type == "ARMATURE":
-                return constraint
-
-    @staticmethod
-    def set_obj_child_of_bone_inverse(obj: bpy.types.Object):
-        """Invert the transformations of the Child Of constraint bone on obj
-        so that the object doesn't get double transformed"""
-        # bone = get_child_of_bone(obj)
-        bone = get_child_of_pose_bone(obj)
-
-        if bone is None:
-            return
-
-        obj.matrix_local = bone.matrix.inverted() @ obj.matrix_local
-
-
-class SOLLUMZ_OT_set_sollum_type(bpy.types.Operator):
+class SOLLUMZ_OT_set_sollum_type(Operator):
     """Set the sollum type of all selected objects"""
     bl_idname = "sollumz.setsollumtype"
     bl_label = "Set Sollum Type"
@@ -855,7 +904,7 @@ class SOLLUMZ_OT_set_sollum_type(bpy.types.Operator):
             obj.sollum_type = sollum_type
 
         self.report(
-            {"INFO"}, f"Sollum Type successfuly set to {SOLLUMZ_UI_NAMES[sollum_type]}.")
+            {"INFO"}, f"Sollum Type successfully set to {SOLLUMZ_UI_NAMES[sollum_type]}.")
 
         return {"FINISHED"}
 

@@ -28,6 +28,12 @@ from ..ydr.shader_materials import (
     VEHICLE_PREVIEW_NODE_DIRT_WETNESS,
     VEHICLE_PREVIEW_NODE_BODY_COLOR,
     VEHICLE_PREVIEW_NODE_LIGHT_EMISSIVE_TOGGLE,
+    get_vehicle_material_paint_layer,
+    set_vehicle_material_paint_layer,
+    update_vehicle_material_paint_name,
+)
+from szio.gta5 import (
+    FragmentTemplateAsset,
 )
 
 
@@ -110,10 +116,16 @@ class ChildProperties(bpy.types.PropertyGroup):
     mass: bpy.props.FloatProperty(name="Mass", min=0)
     damaged: bpy.props.BoolProperty(name="Damaged")
 
-    window_mat: bpy.props.PointerProperty(
-        type=bpy.types.Material, name="Window Material", description="The material of the window mesh (usually a vehglass shader)")
-    is_veh_window: bpy.props.BoolProperty(
-        name="Is Glass Window")
+    shattermap_mode: bpy.props.EnumProperty(
+        items=[
+            ("NO", "No", "Never export as a breakable vehicle window"),
+            ("AUTO", "Auto", "Automatically detect if this is a vehicle window and make it breakable with a generated shattermap. Skipped if not detected as a window"),
+            ("MANUAL_NO_SHATTERMAP", "Simple", "Breakable vehicle window without a shattermap. When broken, leaves no residual glass around the frame. Mainly used for siren glass"),
+            ("MANUAL", "Manual", "Breakable vehicle window with a shattermap created from the provided image"),
+        ],
+        name="Mode",
+        default="AUTO",
+    )
 
 
 class VehicleWindowProperties(bpy.types.PropertyGroup):
@@ -181,6 +193,7 @@ class VehicleRenderPreview(bpy.types.PropertyGroup):
     DEFAULT_BODY_COLOR = (1.0, 1.0, 1.0)
 
     def _on_each_node_tree(self, callback, callback_context):
+        # NOTE: obj may be a fragment or drawable, both can use vehicle shaders
         obj = self.id_data
         if not obj:
             return
@@ -470,15 +483,6 @@ class ClothProperties(bpy.types.PropertyGroup):
     )
 
 
-class FragmentTemplateAsset(IntEnum):
-    NONE = 0xFF
-    FRED = 0
-    WILMA = 1
-    FRED_LARGE = 2
-    WILMA_LARGE = 3
-    ALIEN = 4
-
-
 FragmentTemplateAssetEnumItems = tuple((enum.name, label, desc, enum.value) for enum, label, desc in (
     (FragmentTemplateAsset.NONE, "None", "Use physics defined in this fragment"),
     (FragmentTemplateAsset.FRED, "Fred", "Use 'z_z_fred' physics"),
@@ -545,75 +549,6 @@ def get_light_id_of_selection(self):
     return light_id
 
 
-def _get_mat_paint_layer(self: bpy.types.Material) -> int:
-    """Get material paint layer (i.e Primary, Secondary) based on the value of matDiffuseColor."""
-    paint_layer_int = VehiclePaintLayer.CUSTOM.value
-    if self.node_tree is None:
-        return paint_layer_int
-
-    matDiffuseColor = self.node_tree.nodes.get("matDiffuseColor", None)
-    if matDiffuseColor is None:
-        return paint_layer_int
-
-    x = matDiffuseColor.get("X")
-    if x != 2.0:
-        return paint_layer_int
-
-    y = matDiffuseColor.get("Y")
-    z = matDiffuseColor.get("Z")
-
-    if y != z:
-        return paint_layer_int
-
-    for paint_layer in VehiclePaintLayer:
-        if y == paint_layer.value:
-            paint_layer_int = paint_layer.value
-            break
-
-    return paint_layer_int
-
-
-def _set_mat_paint_layer(self: bpy.types.Material, value_int: int):
-    """Set matDiffuseColor value from paint layer selection."""
-
-    if self.node_tree is None or not 0 <= value_int <= 7:
-        return
-
-    matDiffuseColor = self.node_tree.nodes.get("matDiffuseColor", None)
-    if matDiffuseColor is None:
-        return
-
-    if value_int == 0:
-        matDiffuseColor.set_vec3((1.0, 1.0, 1.0))
-        return
-
-    matDiffuseColor.set("X", 2.0)
-    matDiffuseColor.set("Y", float(value_int))
-    matDiffuseColor.set("Z", float(value_int))
-
-
-def _update_mat_paint_name(mat: bpy.types.Material):
-    """Update material name to have [PAINT_LAYER] extension at the end."""
-    def _get_paint_layer_name(_paint_layer: VehiclePaintLayer):
-        if _paint_layer == VehiclePaintLayer.CUSTOM or _paint_layer == VehiclePaintLayer.DEFAULT:
-            return ""
-        return f"[{_paint_layer.ui_label.upper()}]"
-
-    new_name_ext = _get_paint_layer_name(VehiclePaintLayer[mat.sz_paint_layer])
-    mat_base_name = remove_number_suffix(mat.name).strip()
-
-    # Replace existing extension
-    for paint_layer in VehiclePaintLayer:
-        name_ext = _get_paint_layer_name(paint_layer)
-        if name_ext in mat_base_name:
-            mat_base_name = mat_base_name.replace(name_ext, "").strip()
-
-    if new_name_ext:
-        mat.name = f"{mat_base_name} {new_name_ext}"
-    else:
-        mat.name = mat_base_name
-
-
 def register():
     bpy.types.Object.fragment_properties = bpy.props.PointerProperty(
         type=FragmentProperties)
@@ -666,9 +601,9 @@ def register():
         name="Paint Layer",
         items=VehiclePaintLayerEnumItems,
         default=VehiclePaintLayer.CUSTOM.value,
-        get=_get_mat_paint_layer,
-        set=_set_mat_paint_layer,
-        update=lambda self, context: _update_mat_paint_name(self),
+        get=get_vehicle_material_paint_layer,
+        set=set_vehicle_material_paint_layer,
+        update=lambda self, context: update_vehicle_material_paint_name(self),
     )
 
 

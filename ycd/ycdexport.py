@@ -3,7 +3,7 @@ from mathutils import Vector, Quaternion
 import math
 import struct
 from typing import Optional
-from ..cwxml import clipdictionary as ycdxml
+from szio.gta5.cwxml import clipdictionary as ycdxml
 from ..sollumz_properties import SollumType
 from ..tools import jenkhash
 from ..tools.blenderhelper import build_name_bone_map, build_bone_map
@@ -19,6 +19,7 @@ from ..tools.animationhelper import (
     get_action_duration_frames,
     get_action_duration_secs,
     get_action_export_frame_count,
+    action_fcurves,
 )
 from .properties import ClipAttribute, ClipTag, calculate_final_uv_transform_matrix
 
@@ -70,7 +71,7 @@ def sequence_items_from_action(
     uv_transforms_fcurves = {}
 
     sequence_items: SequenceItems = {}
-    for fcurve in action.fcurves:
+    for fcurve in action_fcurves(action):
         data_path = fcurve.data_path
         bone_id_track_pair = get_id_and_track_from_track_data_path(data_path, target_id, bone_name_map)
         if bone_id_track_pair is None:

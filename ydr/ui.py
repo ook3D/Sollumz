@@ -5,21 +5,25 @@ from bpy.types import (
 from bpy.props import (
     BoolProperty
 )
-import os
-from . import (
-    operators as ydr_ops,
-    cloth_operators as cloth_ops,
+from .operators import (
+    cloths as cloth_ops,
+    cables as cable_ops,
+    drawables as drw_ops,
+    lights as light_ops,
+    materials as mat_ops,
+    lod_tools as lod_ops,
 )
+from .gta5.presets.light import SOLLUMZ_PT_light_presets
 from .shader_materials import shadermats
-from .cable import is_cable_mesh
+from .cable import CableAttr, is_cable_mesh
 from .cloth import ClothAttr
+from .cloth_char import cloth_char_find_mesh_objects
 from .cloth_diagnostics import cloth_last_export_contexts
-from ..cwxml.shader import ShaderManager
+from szio.gta5 import ShaderManager
 from ..sollumz_ui import SOLLUMZ_PT_OBJECT_PANEL, SOLLUMZ_PT_MAT_PANEL
-from ..sollumz_properties import SollumType, MaterialType, LightType, SOLLUMZ_UI_NAMES
-from ..sollumz_ui import FlagsPanel, TimeFlagsPanel
+from ..sollumz_properties import SollumType, MaterialType, LightType, LODLevel, SOLLUMZ_UI_NAMES
+from ..sollumz_ui import FlagsPanel, NoVisibilityToggle, TimeFlagsPanel
 from ..sollumz_helper import find_sollumz_parent
-from ..sollumz_preferences import get_addon_preferences
 from ..icons import icon_manager
 from ..shared.shader_nodes import SzShaderNodeParameter
 from ..tools.meshhelper import (
@@ -27,6 +31,7 @@ from ..tools.meshhelper import (
     get_color_attr_name,
     get_mesh_used_texcoords_indices,
     get_mesh_used_colors_indices,
+    get_mesh_tri_count,
 )
 
 
@@ -64,27 +69,70 @@ class SOLLUMZ_PT_DRAWABLE_PANEL(bpy.types.Panel):
 class SOLLUMZ_UL_SHADER_ORDER_LIST(bpy.types.UIList):
     bl_idname = "SOLLUMZ_UL_SHADER_ORDER_LIST"
 
-    def draw_item(
-        self, context, layout, data, item, icon, active_data, active_propname, index
-    ):
-        row = layout.row()
-        col = row.column()
-        col.label(text=f"{item.index}: {item.name}", icon="MATERIAL")
+    FILTER_FLAG_HIGHLIGHT_NAME = 1
+    FILTER_FLAG_HIGHLIGHT_SHADER = 2
+    FILTER_FLAG_HIGHLIGHT_MODEL = 4
 
-        col = row.column()
-        col.enabled = False
-        col.label(text=item.filename)
+    use_filter_invert_highlight: BoolProperty(name="Invert", description="Invert filtering")
+
+    def draw_item(
+        self, context, layout, data, item, icon, active_data, active_propname, index, flt_flag
+    ):
+        highlight_name = (flt_flag & self.FILTER_FLAG_HIGHLIGHT_NAME) != 0 or flt_flag == 0
+        highlight_shader = (flt_flag & self.FILTER_FLAG_HIGHLIGHT_SHADER) != 0
+        highlight_model = (flt_flag & self.FILTER_FLAG_HIGHLIGHT_MODEL) != 0
+        if self.use_filter_invert_highlight:
+            # On invert only highlight the name, it becomes a bit confusing otherwise
+            if highlight_name or highlight_shader or highlight_model:
+                highlight_name = highlight_shader = highlight_model = False
+            else:
+                highlight_name = True
+                highlight_shader = highlight_model = False
+
+        row = layout.row()
+        row.enabled = highlight_name or highlight_shader or highlight_model
+        split = row.split(factor=0.5)
+        subrow = split.row()
+        col = subrow.column()
+        col.label(text=f"{item.index}: {item.name}", icon_value=layout.icon(item.material))
+
+        col = subrow.column()
+        col.enabled = highlight_shader
+        col.label(text=item.shader)
+
+        col = split.row().column()
+        col.enabled = highlight_model
+        col.label(text=item.user_models)
 
     def draw_filter(self, context, layout):
-        ...
+        row = layout.row()
+
+        subrow = row.row(align=True)
+        subrow.prop(self, "filter_name", text="")
+        subrow.prop(self, "use_filter_invert_highlight", text="", toggle=True, icon="ARROW_LEFTRIGHT")
 
     def filter_items(self, context, data, propname):
         items = getattr(data, propname)
+        helper_funcs = bpy.types.UI_UL_list
 
-        ordered = [item.index for item in items]
-        filtered = [self.bitflag_filter_item] * len(items)
+        # Default return values.
+        flt_flags = []
+        flt_neworder = [item.index for item in items] # sort by shader index always
 
-        return filtered, ordered
+        # Filtering by name
+        if self.filter_name:
+            flt_flags = [self.bitflag_filter_item] * len(items)
+            flt_flags = helper_funcs.filter_items_by_name(
+                self.filter_name, self.FILTER_FLAG_HIGHLIGHT_NAME, items, "name", flags=flt_flags
+            )
+            flt_flags = helper_funcs.filter_items_by_name(
+                self.filter_name, self.FILTER_FLAG_HIGHLIGHT_SHADER, items, "shader", flags=flt_flags
+            )
+            flt_flags = helper_funcs.filter_items_by_name(
+                self.filter_name, self.FILTER_FLAG_HIGHLIGHT_MODEL, items, "user_models", flags=flt_flags
+            )
+
+        return flt_flags, flt_neworder
 
 
 class SOLLUMZ_PT_CHAR_CLOTH_PANEL(bpy.types.Panel):
@@ -99,7 +147,6 @@ class SOLLUMZ_PT_CHAR_CLOTH_PANEL(bpy.types.Panel):
 
     @property
     def has_cloth(self) -> bool:
-        from ..ydr.cloth_char import cloth_char_find_mesh_objects
         obj = bpy.context.view_layer.objects.active
         cloth_objs = cloth_char_find_mesh_objects(obj, silent=True)
         return bool(cloth_objs)
@@ -256,6 +303,9 @@ class SOLLUMZ_PT_LIGHT_PANEL(bpy.types.Panel):
     def draw_header(self, context):
         icon_manager.icon_label("sollumz_icon", self)
 
+    def draw_header_preset(self, _context):
+        SOLLUMZ_PT_light_presets.draw_panel_header(self.layout)
+
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
@@ -277,50 +327,52 @@ class SOLLUMZ_PT_LIGHT_PANEL(bpy.types.Panel):
         if light.sollum_type != LightType.NONE:
             layout.separator()
 
+            light_props = light.light_properties
+
             box = layout.box()
             box.label(text="General Properties")
             box.prop(light, "color")
-            box.prop(light, "energy", text="Intensity")
-            box.prop(light, "cutoff_distance", text="Falloff")
-            box.prop(light, "shadow_soft_size", text="Falloff Exponent")
-            box.prop(light, "shadow_buffer_clip_start", text="Shadow Near Clip")
+            box.prop(light_props, "intensity")
+            box.prop(light_props, "falloff")
+            box.prop(light_props, "falloff_exponent")
+            box.prop(light_props, "shadow_near_clip")
 
             # Extra Properties
             match light.sollum_type:
                 case LightType.SPOT:
                     box = layout.box()
                     box.label(text="Spot Properties")
-                    box.prop(light, "spot_size", text="Cone Outer Angle")
-                    box.prop(light, "spot_blend", text="Cone Inner Angle")
+                    box.prop(light_props, "cone_outer_angle")
+                    box.prop(light_props, "cone_inner_angle")
                 case LightType.CAPSULE:
                     box = layout.box()
                     box.label(text="Capsule Properties")
-                    box.prop(light.light_properties, "extent", index=0)
+                    box.prop(light_props, "extent", index=0)
 
             # Misc Properties
             box = layout.box()
             box.label(text="Misc Properties")
-            box.prop(light.light_properties, "light_hash")
+            box.prop(light_props, "light_hash")
             # box.prop(light.light_properties, "group_id") # this property is unused
-            box.prop(light.light_properties, "projected_texture_hash")
-            box.prop(light.light_properties, "flashiness")
+            box.prop(light_props, "projected_texture_hash")
+            box.prop(light_props, "flashiness")
 
             # Volume properties
             box = layout.box()
             box.label(text="Volume Properties", icon="MOD_EXPLODE")
-            box.prop(light, "volume_factor", text="Volume Intensity")
-            box.prop(light.light_properties, "volume_size_scale")
-            box.prop(light.light_properties, "volume_outer_color")
-            box.prop(light.light_properties, "volume_outer_intensity")
-            box.prop(light.light_properties, "volume_outer_exponent")
+            box.prop(light_props, "volume_intensity")
+            box.prop(light_props, "volume_size_scale")
+            box.prop(light_props, "volume_outer_color")
+            box.prop(light_props, "volume_outer_intensity")
+            box.prop(light_props, "volume_outer_exponent")
 
             # Distance properties
             box = layout.box()
             box.label(text="Distance Properties", icon="DRIVER_DISTANCE")
-            box.prop(light.light_properties, "light_fade_distance")
-            box.prop(light.light_properties, "shadow_fade_distance")
-            box.prop(light.light_properties, "specular_fade_distance")
-            box.prop(light.light_properties, "volumetric_fade_distance")
+            box.prop(light_props, "light_fade_distance")
+            box.prop(light_props, "shadow_fade_distance")
+            box.prop(light_props, "specular_fade_distance")
+            box.prop(light_props, "volumetric_fade_distance")
 
             # Culling Plane
             box = layout.box()
@@ -331,20 +383,20 @@ class SOLLUMZ_PT_LIGHT_PANEL(bpy.types.Panel):
             row.label(text="Culling Plane")
             col = box.column()
             col.active = light.light_flags.enable_culling_plane
-            col.prop(light.light_properties, "culling_plane_normal", text="Normal")
-            col.prop(light.light_properties, "culling_plane_offset", text="Offset")
+            col.prop(light_props, "culling_plane_normal", text="Normal")
+            col.prop(light_props, "culling_plane_offset", text="Offset")
 
             # Corona Properties
             box = layout.box()
             box.label(text="Corona Properties", icon="LIGHT_SUN")
-            box.prop(light.light_properties, "corona_size")
-            box.prop(light.light_properties, "corona_intensity")
-            box.prop(light.light_properties, "corona_z_bias")
+            box.prop(light_props, "corona_size")
+            box.prop(light_props, "corona_intensity")
+            box.prop(light_props, "corona_z_bias")
 
             # Advanced Properties
             box = layout.box()
             box.label(text="Advanced Properties", icon="TOOL_SETTINGS")
-            box.prop(light.light_properties, "shadow_blur")
+            box.prop(light_props, "shadow_blur")
 
 
 class SOLLUMZ_PT_LIGHT_TIME_FLAGS_PANEL(TimeFlagsPanel, bpy.types.Panel):
@@ -424,33 +476,26 @@ class SOLLUMZ_PT_SHADER_TOOLS_PANEL(bpy.types.Panel):
             wm, "sz_shader_materials", wm, "sz_shader_material_index"
         )
         row = layout.row()
-        op = row.operator(ydr_ops.SOLLUMZ_OT_create_shader_material.bl_idname)
+        op = row.operator(mat_ops.SOLLUMZ_OT_create_shader_material.bl_idname)
         op.shader_index = wm.sz_shader_material_index
         grid = layout.grid_flow(align=True)
-        grid.operator(ydr_ops.SOLLUMZ_OT_convert_material_to_selected.bl_idname,
+        grid.operator(mat_ops.SOLLUMZ_OT_convert_material_to_selected.bl_idname,
                       text="Convert Active Material", icon="FILE_REFRESH")
-        grid.operator(
-            ydr_ops.SOLLUMZ_OT_convert_allmaterials_to_selected.bl_idname, text="Convert All Materials")
+        grid.operator(mat_ops.SOLLUMZ_OT_convert_allmaterials_to_selected.bl_idname, text="Convert All Materials")
 
         layout.separator()
         layout.label(text="Tools")
 
         row = layout.row()
-        row.operator(
-            ydr_ops.SOLLUMZ_OT_auto_convert_materials.bl_idname, text="Auto Convert", icon="FILE_REFRESH")
+        row.operator(mat_ops.SOLLUMZ_OT_auto_convert_materials.bl_idname, text="Auto Convert", icon="FILE_REFRESH")
         grid = layout.grid_flow(align=True)
-        grid.operator(
-            ydr_ops.SOLLUMZ_OT_set_all_textures_embedded.bl_idname, icon="TEXTURE")
-        grid.operator(
-            ydr_ops.SOLLUMZ_OT_remove_all_textures_embedded.bl_idname)
+        grid.operator(mat_ops.SOLLUMZ_OT_set_all_textures_embedded.bl_idname, icon="TEXTURE")
+        grid.operator(mat_ops.SOLLUMZ_OT_remove_all_textures_embedded.bl_idname)
         grid = layout.grid_flow(align=True)
-        grid.operator(
-            ydr_ops.SOLLUMZ_OT_set_all_materials_embedded.bl_idname, icon="MATERIAL")
-        grid.operator(
-            ydr_ops.SOLLUMZ_OT_unset_all_materials_embedded.bl_idname)
+        grid.operator(mat_ops.SOLLUMZ_OT_set_all_materials_embedded.bl_idname, icon="MATERIAL")
+        grid.operator(mat_ops.SOLLUMZ_OT_unset_all_materials_embedded.bl_idname)
         grid = layout.grid_flow(align=True)
-        row.operator(
-            ydr_ops.SOLLUMZ_OT_update_tinted_shader_graph.bl_idname, icon="NODETREE")
+        row.operator(mat_ops.SOLLUMZ_OT_update_tinted_shader_graph.bl_idname, icon="NODETREE")
 
 
 class SOLLUMZ_PT_CREATE_DRAWABLE_PANEL(bpy.types.Panel):
@@ -473,12 +518,10 @@ class SOLLUMZ_PT_CREATE_DRAWABLE_PANEL(bpy.types.Panel):
         layout.label(text="Convert", icon="FILE_REFRESH")
 
         row = layout.row()
-        row.operator(
-            ydr_ops.SOLLUMZ_OT_convert_to_drawable_model.bl_idname, icon="MESH_DATA")
+        row.operator(drw_ops.SOLLUMZ_OT_convert_to_drawable_model.bl_idname, icon="MESH_DATA")
 
         row = layout.row()
-        row.operator(
-            ydr_ops.SOLLUMZ_OT_convert_to_drawable.bl_idname, icon="OUTLINER_OB_MESH")
+        row.operator(drw_ops.SOLLUMZ_OT_convert_to_drawable.bl_idname, icon="OUTLINER_OB_MESH")
         row = layout.row()
         row.prop(context.scene, "create_seperate_drawables")
         row.prop(context.scene, "auto_create_embedded_col")
@@ -489,10 +532,8 @@ class SOLLUMZ_PT_CREATE_DRAWABLE_PANEL(bpy.types.Panel):
         layout.label(text="Create", icon="ADD")
 
         row = layout.row(align=True)
-        row.operator(ydr_ops.SOLLUMZ_OT_create_drawable.bl_idname,
-                     icon="OUTLINER_OB_MESH")
-        row.operator(
-            ydr_ops.SOLLUMZ_OT_create_drawable_dict.bl_idname, icon="TEXT")
+        row.operator(drw_ops.SOLLUMZ_OT_create_drawable.bl_idname, icon="OUTLINER_OB_MESH")
+        row.operator(drw_ops.SOLLUMZ_OT_create_drawable_dict.bl_idname, icon="TEXT")
 
 
 class SOLLUMZ_PT_CREATE_LIGHT_PANEL(bpy.types.Panel):
@@ -512,113 +553,9 @@ class SOLLUMZ_PT_CREATE_LIGHT_PANEL(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
 
-        row = layout.row()
-        row.template_list(SOLLUMZ_UL_LIGHT_PRESET_LIST.bl_idname, "light_presets",
-                          context.window_manager, "sz_light_presets", context.window_manager, "sz_light_preset_index")
-        col = row.column(align=True)
-        col.operator(ydr_ops.SOLLUMZ_OT_save_light_preset.bl_idname, text="", icon="ADD")
-        col.operator(ydr_ops.SOLLUMZ_OT_delete_light_preset.bl_idname, text="", icon="REMOVE")
-        col.separator()
-        col.menu(SOLLUMZ_MT_light_presets_context_menu.bl_idname, icon="DOWNARROW_HLT", text="")
-
-        row = layout.row()
-        row.operator(ydr_ops.SOLLUMZ_OT_load_light_preset.bl_idname, icon='CHECKMARK')
-
-        layout.separator()
         row = layout.row(align=True)
-        row.operator(ydr_ops.SOLLUMZ_OT_create_light.bl_idname)
+        row.operator(light_ops.SOLLUMZ_OT_create_light.bl_idname)
         row.prop(context.scene, "create_light_type", text="")
-
-
-class SOLLUMZ_MT_light_presets_context_menu(bpy.types.Menu):
-    bl_label = "Light Presets Specials"
-    bl_idname = "SOLLUMZ_MT_light_presets_context_menu"
-
-    def draw(self, _context):
-        layout = self.layout
-
-        from .properties import get_light_presets_path
-        path = get_light_presets_path()
-        layout.enabled = os.path.exists(path)
-        layout.operator("wm.path_open", text="Open Presets File").filepath = path
-
-
-class SOLLUMZ_UL_LIGHT_PRESET_LIST(bpy.types.UIList):
-    bl_idname = "SOLLUMZ_UL_LIGHT_PRESET_LIST"
-
-    def draw_item(
-        self, context, layout, data, item, icon, active_data, active_propname, index
-    ):
-        row = layout.row()
-        row.label(text=item.name, icon="BOOKMARKS")
-
-
-class SOLLUMZ_PT_SHADER_PRESET_PANEL(bpy.types.Panel):
-    bl_label = "Shader Presets"
-    bl_idname = "SOLLUMZ_PT_SHADER_PRESET_PANEL"
-    bl_category = "Sollumz Tools"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_options = {"DEFAULT_CLOSED"}
-    bl_parent_id = SOLLUMZ_PT_SHADER_TOOLS_PANEL.bl_idname
-
-    bl_order = 1
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon="BOOKMARKS")
-
-    def draw(self, context):
-        layout = self.layout
-        wm = context.window_manager
-
-        row = layout.row()
-        row.template_list(
-            SOLLUMZ_UL_SHADER_PRESET_LIST.bl_idname, "shader_presets",
-            wm, "sz_shader_presets",
-            wm, "sz_shader_preset_index"
-        )
-        col = row.column(align=True)
-        col.operator(ydr_ops.SOLLUMZ_OT_save_shader_preset.bl_idname, text="", icon="ADD")
-        col.operator(ydr_ops.SOLLUMZ_OT_delete_shader_preset.bl_idname, text="", icon="REMOVE")
-        col.separator()
-        col.menu(SOLLUMZ_MT_shader_presets_context_menu.bl_idname, icon="DOWNARROW_HLT", text="")
-
-        row = layout.row(align=True)
-        op = row.operator(ydr_ops.SOLLUMZ_OT_load_shader_preset.bl_idname, icon="CHECKMARK")
-        op.apply_textures = get_addon_preferences(context).shader_preset_apply_textures
-        row.menu(SOLLUMZ_MT_shader_presets_apply_context_menu.bl_idname, icon="DOWNARROW_HLT", text="")
-
-
-class SOLLUMZ_MT_shader_presets_context_menu(bpy.types.Menu):
-    bl_label = "Shader Presets Specials"
-    bl_idname = "SOLLUMZ_MT_shader_presets_context_menu"
-
-    def draw(self, _context):
-        layout = self.layout
-
-        from .properties import get_shader_presets_path
-        path = get_shader_presets_path()
-        layout.enabled = os.path.exists(path)
-        layout.operator("wm.path_open", text="Open Presets File").filepath = path
-
-
-class SOLLUMZ_MT_shader_presets_apply_context_menu(bpy.types.Menu):
-    bl_label = "Shader Presets Apply Options"
-    bl_idname = "SOLLUMZ_MT_shader_presets_apply_context_menu"
-
-    def draw(self, context):
-        layout = self.layout
-        layout.prop(get_addon_preferences(context), "shader_preset_apply_textures", text="Apply Textures")
-
-
-class SOLLUMZ_UL_SHADER_PRESET_LIST(bpy.types.UIList):
-    bl_idname = "SOLLUMZ_UL_SHADER_PRESET_LIST"
-
-    def draw_item(
-        self, context, layout, data, item, icon, active_data, active_propname, index
-    ):
-        row = layout.row()
-        row.label(text=item.name, icon="BOOKMARKS")
 
 
 class SOLLUMZ_PT_BONE_TOOLS_PANEL(bpy.types.Panel):
@@ -647,28 +584,15 @@ class SOLLUMZ_PT_BONE_TOOLS_PANEL(bpy.types.Panel):
 
         layout.label(text="Apply Bone Properties", icon="MODIFIER_ON")
         row = layout.row(align=True)
-        row.operator(
-            ydr_ops.SOLLUMZ_OT_apply_bone_properties_to_armature.bl_idname)
-        row.operator(
-            ydr_ops.SOLLUMZ_OT_apply_bone_properties_to_selected_bones.bl_idname)
+        row.operator(drw_ops.SOLLUMZ_OT_apply_bone_properties_to_armature.bl_idname)
+        row.operator(drw_ops.SOLLUMZ_OT_apply_bone_properties_to_selected_bones.bl_idname)
         layout.separator()
         layout.label(text="Apply Bone Flags", icon="BOOKMARKS")
         row = layout.row(align=True)
-        row.operator(ydr_ops.SOLLUMZ_OT_clear_bone_flags.bl_idname,
-                     text="Clear All")
-        row.operator(
-            ydr_ops.SOLLUMZ_OT_rotation_bone_flags.bl_idname, text="Rotation")
-        row.operator(
-            ydr_ops.SOLLUMZ_OT_translation_bone_flags.bl_idname, text="Translation")
-        row.operator(
-            ydr_ops.SOLLUMZ_OT_scale_bone_flags.bl_idname, text="Scale")
-        row.operator(
-            ydr_ops.SOLLUMZ_OT_limit_bone_flags.bl_idname, text="Limit")
-
-
-class SOLLUMZ_UL_BONE_FLAGS(bpy.types.UIList):
-    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        layout.prop(item, "name", text="", icon="FILE", emboss=False, translate=False)
+        row.operator(drw_ops.SOLLUMZ_OT_clear_bone_flags.bl_idname, text="Clear All")
+        row.operator(drw_ops.SOLLUMZ_OT_rotation_bone_flags.bl_idname, text="Rotation")
+        row.operator(drw_ops.SOLLUMZ_OT_translation_bone_flags.bl_idname, text="Translation")
+        row.operator(drw_ops.SOLLUMZ_OT_scale_bone_flags.bl_idname, text="Scale")
 
 
 class SOLLUMZ_PT_BONE_PANEL(bpy.types.Panel):
@@ -695,15 +619,18 @@ class SOLLUMZ_PT_BONE_PANEL(bpy.types.Panel):
         row = layout.row(align=True)
         row.prop(bone.bone_properties, "tag")
         row.prop(bone.bone_properties, "use_manual_tag", toggle=True, icon="MODIFIER_ON", icon_only=True)
-        layout.separator()
 
         layout.label(text="Flags")
-        row = layout.row()
-        row.template_list("SOLLUMZ_UL_BONE_FLAGS", "Flags",
-                          bone.bone_properties, "flags", bone.bone_properties, "ul_index")
-        col = row.column(align=True)
-        col.operator("sollumz.bone_flags_new_item", text="", icon="ADD")
-        col.operator("sollumz.bone_flags_delete_item", text="", icon="REMOVE")
+        row = layout.row(align=True)
+        row.use_property_split = False
+        for flags in (
+            ("RotX", "RotY", "RotZ"),
+            ("TransX", "TransY", "TransZ"),
+            ("ScaleX", "ScaleY", "ScaleZ"),
+        ):
+            col = row.column(align=True)
+            for flag in flags:
+                col.prop_enum(bone.bone_properties, "flags_enum", flag, text=flag)
 
 
 class SOLLUMZ_PT_SHADER_PANEL(bpy.types.Panel):
@@ -754,7 +681,7 @@ class SOLLUMZ_PT_change_shader(bpy.types.Panel):
             SOLLUMZ_UL_SHADER_MATERIALS_LIST.bl_idname, "",
             wm, "sz_shader_materials", wm, "sz_shader_material_index"
         )
-        op = layout.operator(ydr_ops.SOLLUMZ_OT_change_shader.bl_idname)
+        op = layout.operator(mat_ops.SOLLUMZ_OT_change_shader.bl_idname)
         op.shader_index = wm.sz_shader_material_index
 
 
@@ -807,7 +734,14 @@ class SOLLUMZ_PT_TXTPARAMS_PANEL(bpy.types.Panel):
             split = layout.split(factor=SPLIT_FACTOR)
             split.alignment = "RIGHT"
             split.label(text=n.name)
-            split.template_ID(n, "image", open="image.open")
+            row = split.row(align=True)
+            row.template_ID(n, "image", open="image.open")
+            if n.image is not None:
+                subrow = row.row(align=True)
+                subrow.alignment = "RIGHT"
+                subrow.scale_x = 0.65
+                subrow.enabled = n.texture_properties.embedded
+                subrow.prop(n.image, "sz_is_hd", toggle=True, text="HD")
 
             if n.image is not None:
                 split = layout.split(factor=SPLIT_FACTOR)  # split to align the props with the image selector
@@ -882,24 +816,45 @@ class SOLLUMZ_PT_AUTO_LOD_PANEL(bpy.types.Panel):
     bl_category = "Sollumz Tools"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_options = {"HIDE_HEADER"}
     bl_parent_id = SOLLUMZ_PT_LOD_TOOLS_PANEL.bl_idname
 
     bl_order = 0
 
     def draw(self, context: Context):
         layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
 
-        layout.label(text="Auto LOD")
         box = layout.box()
 
-        box.prop(context.scene, "sollumz_auto_lod_levels")
-        box.separator(factor=0.25)
-        box.prop(context.scene, "sollumz_auto_lod_ref_mesh",
-                 text="Reference Mesh")
-        box.prop(context.scene, "sollumz_auto_lod_decimate_step")
-        box.separator()
-        box.operator("sollumz.auto_lod", icon="MOD_DECIM")
+        settings = context.scene.sz_auto_lod_settings
+        settings.draw_settings(context, box)
+
+        row = box.row(align=True)
+        row.scale_y = 1.3
+        row.operator(lod_ops.SOLLUMZ_OT_auto_lod.bl_idname, icon="MOD_DECIM")
+
+        # LOD Stats Display
+        obj = context.active_object
+        if obj is not None and obj.sollum_type == SollumType.DRAWABLE_MODEL:
+            lods = obj.sz_lods
+            has_any = False
+            for lod_level in LODLevel:
+                mesh = lods.get_lod(lod_level).mesh
+                if mesh is not None:
+                    if not has_any:
+                        stats_box = box.box()
+                        stats_col = stats_box.column(align=True)
+                        stats_col.label(text="LOD Statistics", icon="INFO")
+                        has_any = True
+                    tri_count = get_mesh_tri_count(mesh)
+                    split = stats_col.split(factor=0.4)
+                    row = split.row()
+                    row.alignment = "RIGHT"
+                    row.label(text=f"{SOLLUMZ_UI_NAMES[lod_level]}")
+                    row = split.row()
+                    row.alignment = "LEFT"
+                    row.label(text=f"{tri_count} tris / {len(mesh.vertices)} verts")
 
 
 class SOLLUMZ_PT_EXTRACT_LODS_PANEL(bpy.types.Panel):
@@ -908,7 +863,7 @@ class SOLLUMZ_PT_EXTRACT_LODS_PANEL(bpy.types.Panel):
     bl_category = "Sollumz Tools"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_options = {"HIDE_HEADER"}
+    bl_options = {"DEFAULT_CLOSED"}
     bl_parent_id = SOLLUMZ_PT_LOD_TOOLS_PANEL.bl_idname
 
     bl_order = 1
@@ -916,7 +871,6 @@ class SOLLUMZ_PT_EXTRACT_LODS_PANEL(bpy.types.Panel):
     def draw(self, context: Context):
         layout = self.layout
 
-        layout.label(text="Extract LODs")
         box = layout.box()
         box.separator(factor=0.25)
 
@@ -926,6 +880,52 @@ class SOLLUMZ_PT_EXTRACT_LODS_PANEL(bpy.types.Panel):
         box.separator()
 
         box.operator("sollumz.extract_lods", icon="EXPORT")
+
+
+class SOLLUMZ_PT_MATERIAL_MERGE_PANEL(bpy.types.Panel):
+    bl_label = "Material Merge"
+    bl_idname = "SOLLUMZ_PT_MATERIAL_MERGE_PANEL"
+    bl_category = "Sollumz Tools"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_options = {"DEFAULT_CLOSED"}
+    bl_parent_id = SOLLUMZ_PT_LOD_TOOLS_PANEL.bl_idname
+
+    bl_order = 2
+
+    def draw(self, context: Context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        box = layout.box()
+
+        settings = context.scene.sz_material_merge_settings
+        col = box.column()
+        col.prop(settings, "texture_size")
+        col.prop(settings, "bake_type")
+        col.prop(settings, "uv_margin")
+        col.prop(settings, "samples")
+
+        row = box.row(align=True)
+        row.scale_y = 1.3
+        row.operator(lod_ops.SOLLUMZ_OT_material_merge_bake.bl_idname, icon="RENDER_STILL")
+
+        obj = context.active_object
+        if obj is not None and obj.type == "MESH":
+            mat_count = len(obj.data.materials)
+            col = box.column(align=True)
+            for left_side, right_side in (("Object", obj.name), ("Materials", f"{mat_count}")):
+                split = col.split(factor=0.4)
+                row = split.row()
+                row.alignment = "RIGHT"
+                row.label(text=left_side)
+                row = split.row()
+                row.alignment = "LEFT"
+                row.label(text=right_side)
+        else:
+            box.label(text="Select a mesh object", icon="ERROR")
+
 
 
 class SOLLUMZ_PT_CABLE_TOOLS_PANEL(bpy.types.Panel):
@@ -943,69 +943,62 @@ class SOLLUMZ_PT_CABLE_TOOLS_PANEL(bpy.types.Panel):
         self.layout.label(text="", icon="OUTLINER_DATA_GREASEPENCIL")
 
     def draw(self, context):
-        from . import cable_operators as cable_ops
-        from .cable import CableAttr
-
         wm = context.window_manager
-
         layout = self.layout
 
-        def _visible_icon_prop(layout, obj, prop_name):
-            visible_icon = "HIDE_OFF" if getattr(obj, prop_name, False) else "HIDE_ON"
-            layout.prop(obj, prop_name, text="", emboss=False, icon=visible_icon)
-
-        row = layout.row(align=True)
-        row.label(text=CableAttr.RADIUS.label)
-        _visible_icon_prop(row, wm, "sz_ui_cable_radius_visualize")
-
-        row = layout.row(align=True)
-        op = row.operator(cable_ops.SOLLUMZ_OT_cable_set_radius.bl_idname, text="Set")
+        controls = _attr_row(layout, wm, CableAttr.RADIUS.label, "sz_ui_cable_radius_visualize")
+        controls.prop(wm, "sz_ui_cable_radius", text="")
+        op = controls.operator(cable_ops.SOLLUMZ_OT_cable_set_radius.bl_idname, text="", icon="CHECKMARK")
         op.value = wm.sz_ui_cable_radius
-        row.prop(wm, "sz_ui_cable_radius", text="")
 
-        row = layout.row(align=True)
-        row.label(text=CableAttr.DIFFUSE_FACTOR.label)
-        _visible_icon_prop(row, wm, "sz_ui_cable_diffuse_factor_visualize")
-
-        row = layout.row(align=True)
-        op = row.operator(cable_ops.SOLLUMZ_OT_cable_set_diffuse_factor.bl_idname, text="Set")
+        controls = _attr_row(layout, wm, CableAttr.DIFFUSE_FACTOR.label, "sz_ui_cable_diffuse_factor_visualize")
+        controls.prop(wm, "sz_ui_cable_diffuse_factor", text="")
+        op = controls.operator(cable_ops.SOLLUMZ_OT_cable_set_diffuse_factor.bl_idname, text="", icon="CHECKMARK")
         op.value = wm.sz_ui_cable_diffuse_factor
-        row.prop(wm, "sz_ui_cable_diffuse_factor", text="")
 
-        row = layout.row(align=True)
-        row.label(text=CableAttr.UM_SCALE.label)
-        _visible_icon_prop(row, wm, "sz_ui_cable_um_scale_visualize")
-
-        row = layout.row(align=True)
-        op = row.operator(cable_ops.SOLLUMZ_OT_cable_set_um_scale.bl_idname, text="Set")
+        controls = _attr_row(layout, wm, CableAttr.UM_SCALE.label, "sz_ui_cable_um_scale_visualize")
+        controls.prop(wm, "sz_ui_cable_um_scale", text="")
+        op = controls.operator(cable_ops.SOLLUMZ_OT_cable_set_um_scale.bl_idname, text="", icon="CHECKMARK")
         op.value = wm.sz_ui_cable_um_scale
-        row.prop(wm, "sz_ui_cable_um_scale", text="")
 
-        row = layout.row(align=True)
-        row.label(text=CableAttr.PHASE_OFFSET.label)
-        _visible_icon_prop(row, wm, "sz_ui_cable_phase_offset_visualize")
-
-        row = layout.row(align=True)
-        op = row.operator(cable_ops.SOLLUMZ_OT_cable_set_phase_offset.bl_idname, text="Set")
+        col = layout.column()
+        controls = _attr_row(col, wm, CableAttr.PHASE_OFFSET.label, "sz_ui_cable_phase_offset_visualize")
+        controls.prop(wm, "sz_ui_cable_phase_offset", text="")
+        op = controls.operator(cable_ops.SOLLUMZ_OT_cable_set_phase_offset.bl_idname, text="", icon="CHECKMARK")
         op.value = wm.sz_ui_cable_phase_offset
-        row.prop(wm, "sz_ui_cable_phase_offset", text="")
 
-        row = layout.row(align=True)
-        op = row.operator(cable_ops.SOLLUMZ_OT_cable_randomize_phase_offset.bl_idname, text="Randomize")
+        controls = _attr_row(col, wm, "")
+        controls.operator(cable_ops.SOLLUMZ_OT_cable_randomize_phase_offset.bl_idname, text="Randomize")
 
-        row = layout.row(align=True)
-        row.label(text=CableAttr.MATERIAL_INDEX.label)
-        _visible_icon_prop(row, wm, "sz_ui_cable_material_index_visualize")
-
-        row = layout.row(align=True)
-        op = row.operator(cable_ops.SOLLUMZ_OT_cable_set_material_index.bl_idname, text="Set")
+        controls = _attr_row(layout, wm, CableAttr.MATERIAL_INDEX.label, "sz_ui_cable_material_index_visualize")
+        controls.prop(wm, "sz_ui_cable_material_index", text="")
+        op = controls.operator(cable_ops.SOLLUMZ_OT_cable_set_material_index.bl_idname, text="", icon="CHECKMARK")
         op.value = wm.sz_ui_cable_material_index
-        row.prop(wm, "sz_ui_cable_material_index", text="")
 
 
 def _visible_icon_prop(layout, obj, prop_name):
     visible_icon = "HIDE_OFF" if getattr(obj, prop_name, False) else "HIDE_ON"
     layout.prop(obj, prop_name, text="", emboss=False, icon=visible_icon)
+
+
+def _attr_row(layout, wm, label, vis_prop=None):
+    """One attribute per line: label, then the controls column, then the visualize eye.
+
+    Every row uses the same column widths so the controls line up vertically.
+    """
+    split = layout.split(factor=0.4, align=True)
+    row = split.row()
+    row.alignment = "RIGHT"
+    row.label(text=label)
+    right = split.row()
+    controls = right.row(align=True)
+    eye = right.row(align=False)
+    if vis_prop:
+        _visible_icon_prop(eye, wm, vis_prop)
+    else:
+        # blank label for aligning controls of rows without eye toggle
+        eye.label(text="", icon="BLANK1")
+    return controls
 
 
 class SOLLUMZ_PT_CLOTH_TOOLS_PANEL(bpy.types.Panel):
@@ -1022,79 +1015,51 @@ class SOLLUMZ_PT_CLOTH_TOOLS_PANEL(bpy.types.Panel):
         self.layout.label(text="", icon="MATCLOTH")
 
     def draw(self, context):
-
         wm = context.window_manager
-
         layout = self.layout
 
-        row = layout.row(align=True)
-        row.label(text=ClothAttr.VERTEX_WEIGHT.label)
-        _visible_icon_prop(row, wm, "sz_ui_cloth_vertex_weight_visualize")
-
-        row = layout.row(align=True)
-        op = row.operator(cloth_ops.SOLLUMZ_OT_cloth_set_vertex_weight.bl_idname, text="Set")
+        controls = _attr_row(layout, wm, ClothAttr.VERTEX_WEIGHT.label, "sz_ui_cloth_vertex_weight_visualize")
+        controls.prop(wm, "sz_ui_cloth_vertex_weight", text="")
+        op = controls.operator(cloth_ops.SOLLUMZ_OT_cloth_set_vertex_weight.bl_idname, text="", icon="CHECKMARK")
         op.value = wm.sz_ui_cloth_vertex_weight
-        row.prop(wm, "sz_ui_cloth_vertex_weight", text="")
 
-        row = layout.row(align=True)
-        row.label(text=ClothAttr.INFLATION_SCALE.label)
-        _visible_icon_prop(row, wm, "sz_ui_cloth_inflation_scale_visualize")
-
-        row = layout.row(align=True)
-        op = row.operator(cloth_ops.SOLLUMZ_OT_cloth_set_inflation_scale.bl_idname, text="Set")
+        controls = _attr_row(layout, wm, ClothAttr.INFLATION_SCALE.label, "sz_ui_cloth_inflation_scale_visualize")
+        controls.prop(wm, "sz_ui_cloth_inflation_scale", text="")
+        op = controls.operator(cloth_ops.SOLLUMZ_OT_cloth_set_inflation_scale.bl_idname, text="", icon="CHECKMARK")
         op.value = wm.sz_ui_cloth_inflation_scale
-        row.prop(wm, "sz_ui_cloth_inflation_scale", text="")
 
-        row = layout.row(align=True)
-        row.label(text=ClothAttr.PINNED.label)
-        _visible_icon_prop(row, wm, "sz_ui_cloth_pinned_visualize")
+        controls = _attr_row(layout, wm, ClothAttr.PINNED.label, "sz_ui_cloth_pinned_visualize")
+        controls.operator(cloth_ops.SOLLUMZ_OT_cloth_set_pinned.bl_idname, text="Pin").value = True
+        controls.operator(cloth_ops.SOLLUMZ_OT_cloth_set_pinned.bl_idname, text="Unpin").value = False
 
-        row = layout.row(align=True)
-        op = row.operator(cloth_ops.SOLLUMZ_OT_cloth_set_pinned.bl_idname, text="Pin")
-        op.value = True
-        op = row.operator(cloth_ops.SOLLUMZ_OT_cloth_set_pinned.bl_idname, text="Unpin")
-        op.value = False
-
-        row = layout.row(align=True)
-        split = row.split(factor=0.5)
-        row = split.row()
-        row.label(text=ClothAttr.PIN_RADIUS.label)
-        row = split.row()
-        split = row.split(factor=0.5)
-        row = split.row()
-        row.prop(wm, "sz_ui_cloth_pin_radius_set", text="")
-        row = split.row()
-        row.alignment = "RIGHT"
-        _visible_icon_prop(row, wm, "sz_ui_cloth_pin_radius_visualize")
-
-        row = layout.row(align=True)
-        op = row.operator(cloth_ops.SOLLUMZ_OT_cloth_set_pin_radius.bl_idname, text="Set")
+        col = layout.column()
+        controls = _attr_row(col, wm, ClothAttr.PIN_RADIUS.label, "sz_ui_cloth_pin_radius_visualize")
+        # Set number goes in front of the value so it stays inside the controls column
+        sub = controls.split(factor=0.3, align=True)
+        sub.prop(wm, "sz_ui_cloth_pin_radius_set", text="")
+        sub.prop(wm, "sz_ui_cloth_pin_radius", text="")
+        op = controls.operator(cloth_ops.SOLLUMZ_OT_cloth_set_pin_radius.bl_idname, text="", icon="CHECKMARK")
         op.set_number = wm.sz_ui_cloth_pin_radius_set
         op.value = wm.sz_ui_cloth_pin_radius
-        row.prop(wm, "sz_ui_cloth_pin_radius", text="")
 
-        row = layout.row(align=True)
-        split = row.split(factor=0.5, align=True)
-        row = split.row(align=True)
-        op = row.operator(cloth_ops.SOLLUMZ_OT_cloth_set_pin_radius_gradient.bl_idname, text="Fill Gradient")
+        subcol = col.column(align=True)
+        controls = _attr_row(subcol, wm, "")
+        controls_col = controls.column(align=True)
+        controls_row = controls_col.row(align=True)
+        controls_row.prop(wm, "sz_ui_cloth_pin_radius_gradient_min", text="")
+        controls_row.prop(wm, "sz_ui_cloth_pin_radius_gradient_max", text="")
+        op = controls_col.operator(cloth_ops.SOLLUMZ_OT_cloth_set_pin_radius_gradient.bl_idname, text="Fill Gradient")
         op.min_value = wm.sz_ui_cloth_pin_radius_gradient_min
         op.max_value = wm.sz_ui_cloth_pin_radius_gradient_max
         op.set_number = wm.sz_ui_cloth_pin_radius_set
-        row = split.row(align=True)
-        row.prop(wm, "sz_ui_cloth_pin_radius_gradient_min", text="")
-        row.prop(wm, "sz_ui_cloth_pin_radius_gradient_max", text="")
 
-        row = layout.row(align=True)
-        row.label(text=ClothAttr.FORCE_TRANSFORM.label)
-        _visible_icon_prop(row, wm, "sz_ui_cloth_force_transform_visualize")
-
-        row = layout.row(align=True)
-        op = row.operator(cloth_ops.SOLLUMZ_OT_cloth_set_force_transform.bl_idname, text="Set")
+        controls = _attr_row(layout, wm, ClothAttr.FORCE_TRANSFORM.label, "sz_ui_cloth_force_transform_visualize")
+        controls.prop(wm, "sz_ui_cloth_force_transform", text="")
+        op = controls.operator(cloth_ops.SOLLUMZ_OT_cloth_set_force_transform.bl_idname, text="", icon="CHECKMARK")
         op.value = wm.sz_ui_cloth_force_transform
-        row.prop(wm, "sz_ui_cloth_force_transform", text="")
 
 
-class SOLLUMZ_PT_CLOTH_DIAGNOSTICS_PANEL(bpy.types.Panel):
+class SOLLUMZ_PT_CLOTH_DIAGNOSTICS_PANEL(NoVisibilityToggle, bpy.types.Panel):
     bl_label = "Diagnostics"
     bl_idname = "SOLLUMZ_PT_CLOTH_DIAGNOSTICS_PANEL"
     bl_space_type = "VIEW_3D"
@@ -1132,8 +1097,8 @@ def uv_maps_panel_draw(self, context):
     layout = self.layout
     layout.label(text="Missing UV maps used by Sollumz shaders:", icon="ERROR")
     split = layout.split(factor=0.5, align=True)
-    split.operator(ydr_ops.SOLLUMZ_OT_uv_maps_rename_by_order.bl_idname, text="Rename by Order")
-    split.operator(ydr_ops.SOLLUMZ_OT_uv_maps_add_missing.bl_idname, text="Add Missing")
+    split.operator(drw_ops.SOLLUMZ_OT_uv_maps_rename_by_order.bl_idname, text="Rename by Order")
+    split.operator(drw_ops.SOLLUMZ_OT_uv_maps_add_missing.bl_idname, text="Add Missing")
     for texcoord, name in zip(texcoords, texcoords_names):
         exists = name in me.uv_layers
         layout.label(text=name, icon="CHECKMARK" if exists else "X")
@@ -1157,8 +1122,8 @@ def color_attributes_panel_draw(self, context):
     layout = self.layout
     layout.label(text="Missing color attributes used by Sollumz shaders:", icon="ERROR")
     split = layout.split(factor=0.5, align=True)
-    split.operator(ydr_ops.SOLLUMZ_OT_color_attrs_rename_by_order.bl_idname, text="Rename by Order")
-    split.operator(ydr_ops.SOLLUMZ_OT_color_attrs_add_missing.bl_idname, text="Add Missing")
+    split.operator(drw_ops.SOLLUMZ_OT_color_attrs_rename_by_order.bl_idname, text="Rename by Order")
+    split.operator(drw_ops.SOLLUMZ_OT_color_attrs_add_missing.bl_idname, text="Add Missing")
     for color, name in zip(colors, colors_names):
         exists = name in me.color_attributes
         if exists:

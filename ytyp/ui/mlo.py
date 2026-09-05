@@ -9,7 +9,13 @@ from ...shared.multiselection import (
     multiselect_ui_draw_list,
     MultiSelectUIFlagsPanel,
 )
-from ..operators import ytyp as ytyp_ops
+from ..operators import (
+    ytyp as ytyp_ops,
+    mlo as mlo_ops,
+)
+from ..gta5.presets.mlo_room import SOLLUMZ_PT_mlo_room_presets
+from ..gta5.presets.mlo_portal import SOLLUMZ_PT_mlo_portal_presets
+from ..gta5.presets.mlo_timecycle_modifier import SOLLUMZ_PT_mlo_timecycle_modifier_presets
 
 
 class SOLLUMZ_PT_MLO_PANEL(ArchetypeChildPanel, TabbedPanelHelper, bpy.types.Panel):
@@ -27,7 +33,12 @@ class SOLLUMZ_PT_MLO_PANEL(ArchetypeChildPanel, TabbedPanelHelper, bpy.types.Pan
         return selected_archetype is not None and selected_archetype.type == ArchetypeType.MLO
 
     def draw_before(self, context: bpy.types.Context):
-        self.layout.label(text="MLO")
+        split = self.layout.split(factor=0.333333, align=True)
+        split.label(text="MLO")
+        split.label(text="")
+        row = split.row(align=True)
+        row.operator(mlo_ops.SOLLUMZ_OT_mlo_create_instance.bl_idname, icon="OUTLINER_OB_GROUP_INSTANCE")
+        row.operator(mlo_ops.SOLLUMZ_OT_mlo_refresh_instances.bl_idname, text="", icon="FILE_REFRESH")
 
 
 class MloChildTabPanel(TabPanel):
@@ -95,6 +106,11 @@ class SOLLUMZ_PT_ROOM_PANEL(MloChildTabPanel, bpy.types.Panel):
         # active = selected_archetype.rooms.active_item
 
         layout.separator()
+
+        row = layout.row()
+        row.alignment = "RIGHT"
+        SOLLUMZ_PT_mlo_room_presets.draw_panel_header(row)
+
         for prop_name in RoomProperties.__annotations__:
             if prop_name in ["flags", "id", "uuid"]:
                 continue
@@ -110,9 +126,11 @@ class SOLLUMZ_MT_rooms_list_context_menu(bpy.types.Menu):
 
     def draw(self, _context):
         layout = self.layout
-        op = layout.operator(ytyp_ops.SOLLUMZ_OT_archetype_select_all_mlo_room.bl_idname, text="Select All")
+        op0 = layout.operator(ytyp_ops.SOLLUMZ_OT_archetype_select_all_mlo_room.bl_idname, text="Select All")
+        op1 = layout.operator(ytyp_ops.SOLLUMZ_OT_archetype_select_invert_mlo_room.bl_idname, text="Invert")
         if (filter_opts := SOLLUMZ_UL_ROOM_LIST.last_filter_options.get("rooms_tool_panel", None)):
-            filter_opts.apply_to_operator(op)
+            filter_opts.apply_to_operator(op0)
+            filter_opts.apply_to_operator(op1)
 
 
 class SOLLUMZ_PT_ROOM_FLAGS_PANEL(MultiSelectUIFlagsPanel, bpy.types.Panel):
@@ -240,6 +258,11 @@ class SOLLUMZ_PT_PORTAL_PANEL(MloChildTabPanel, bpy.types.Panel):
         row.operator("sollumz.search_portal_room_to", text="", icon="VIEWZOOM")
 
         layout.separator()
+
+        row = layout.row()
+        row.alignment = "RIGHT"
+        SOLLUMZ_PT_mlo_portal_presets.draw_panel_header(row)
+
         layout.prop(selection.owner, selection.propnames.mirror_priority)
         layout.prop(selection.owner, selection.propnames.opacity)
         layout.prop(selection.owner, selection.propnames.audio_occlusion)
@@ -251,9 +274,11 @@ class SOLLUMZ_MT_portals_list_context_menu(bpy.types.Menu):
 
     def draw(self, _context):
         layout = self.layout
-        op = layout.operator(ytyp_ops.SOLLUMZ_OT_archetype_select_all_mlo_portal.bl_idname, text="Select All")
+        op0 = layout.operator(ytyp_ops.SOLLUMZ_OT_archetype_select_all_mlo_portal.bl_idname, text="Select All")
+        op1 = layout.operator(ytyp_ops.SOLLUMZ_OT_archetype_select_invert_mlo_portal.bl_idname, text="Invert")
         if (filter_opts := SOLLUMZ_UL_PORTAL_LIST.last_filter_options.get("portals_tool_panel", None)):
-            filter_opts.apply_to_operator(op)
+            filter_opts.apply_to_operator(op0)
+            filter_opts.apply_to_operator(op1)
 
 
 class SOLLUMZ_PT_PORTAL_FLAGS_PANEL(MultiSelectUIFlagsPanel, bpy.types.Panel):
@@ -336,6 +361,10 @@ class SOLLUMZ_PT_TIMECYCLE_MODIFIER_PANEL(MloChildTabPanel, bpy.types.Panel):
 
         layout.separator()
 
+        row = layout.row()
+        row.alignment = "RIGHT"
+        SOLLUMZ_PT_mlo_timecycle_modifier_presets.draw_panel_header(row)
+
         layout.prop(selection.owner, selection.propnames.name)
         layout.prop(selection.owner, selection.propnames.sphere_center)
         layout.prop(selection.owner, selection.propnames.sphere_radius)
@@ -351,9 +380,11 @@ class SOLLUMZ_MT_timecycle_modifiers_list_context_menu(bpy.types.Menu):
 
     def draw(self, _context):
         layout = self.layout
-        op = layout.operator(ytyp_ops.SOLLUMZ_OT_archetype_select_all_mlo_tcm.bl_idname, text="Select All")
+        op0 = layout.operator(ytyp_ops.SOLLUMZ_OT_archetype_select_all_mlo_tcm.bl_idname, text="Select All")
+        op1 = layout.operator(ytyp_ops.SOLLUMZ_OT_archetype_select_invert_mlo_tcm.bl_idname, text="Invert")
         if (filter_opts := SOLLUMZ_UL_TIMECYCLE_MODIFIER_LIST.last_filter_options.get("timecycle_modifiers_tool_panel", None)):
-            filter_opts.apply_to_operator(op)
+            filter_opts.apply_to_operator(op0)
+            filter_opts.apply_to_operator(op1)
 
 
 class SOLLUMZ_PT_MLO_FLAGS_PANEL(MloChildTabPanel, MultiSelectUIFlagsPanel, bpy.types.Panel):
@@ -376,3 +407,17 @@ class SOLLUMZ_PT_MLO_FLAGS_PANEL(MloChildTabPanel, MultiSelectUIFlagsPanel, bpy.
     def get_flags_selection(self, context):
         selected_ytyp = get_selected_ytyp(context)
         return selected_ytyp.archetypes.selection.mlo_flags
+
+    def draw(self, context):
+        active = self.get_flags_active(context)
+        selection = self.get_flags_selection(context)
+        self.layout.prop(selection.owner, selection.propnames.total)
+        self.layout.separator()
+        grid = self.layout.grid_flow(columns=2)
+        active_props = active.bl_rna.properties
+        for index, prop_name in enumerate(active.get_flag_names()):
+            if index > active.size - 1:
+                break
+            if active_props[prop_name].name == "Unused":
+                continue
+            grid.prop(selection.owner, getattr(selection.propnames, prop_name))

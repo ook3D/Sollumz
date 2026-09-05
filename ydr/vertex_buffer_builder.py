@@ -13,9 +13,11 @@ from ..tools.meshhelper import (
     get_color_attr_name,
     get_uv_map_name,
 )
-from ..cwxml.drawable import VertexBuffer
-from ..cwxml.cloth import CharacterCloth
-from ..cwxml.shader import ShaderManager
+from szio.gta5 import (
+    ShaderManager,
+    STANDARD_VERTEX_ATTR_DTYPES,
+    CharacterCloth as IOCharacterCloth,
+)
 from .cloth_char import (
     CLOTH_CHAR_VERTEX_GROUP_NAME,
     cloth_char_get_mesh_to_cloth_bindings,
@@ -24,6 +26,7 @@ from .cloth_diagnostics import (
     ClothDiagMeshMaterialError,
     cloth_export_context,
 )
+from .vertex_buffer_builder_domain import VBBuilderDomain
 
 from .. import logger
 
@@ -103,7 +106,27 @@ def dedupe_and_get_indices(vertex_arr: NDArray) -> Tuple[NDArray, NDArray[np.uin
     # Convert vertex array to a 2D unstructured array of float64 to be able to use np.round, it doesn't work on the
     # structured array.
     # Each vertex is converted to a float64 array by concatenating the struct fields: [x, y, z, nx, ny, nz, r, g, b, a, ...]
-    vertex_arr_flatten = np.concatenate([vertex_arr[name] for name in vertex_arr.dtype.names], axis=1, dtype=np.float64)
+
+    # Pre-allocate flattened array
+    names = vertex_arr.dtype.names
+    num_verts = len(vertex_arr)
+    total_cols = sum(
+        vertex_arr[name].shape[1] if vertex_arr[name].ndim > 1 else 1
+        for name in names
+    )
+
+    vertex_arr_flatten = np.empty((num_verts, total_cols), dtype=np.float64)
+    col = 0
+    for name in names:
+        arr = vertex_arr[name]
+        if arr.ndim == 1:
+            vertex_arr_flatten[:, col] = arr
+            col += 1
+        else:
+            width = arr.shape[1]
+            vertex_arr_flatten[:, col:col + width] = arr
+            col += width
+
     np.round(vertex_arr_flatten, out=vertex_arr_flatten, decimals=6)
 
     _, unique_indices, inverse_indices = np.unique(vertex_arr_flatten, axis=0, return_index=True, return_inverse=True)
@@ -136,16 +159,6 @@ def get_sorted_vertex_group_elements(vertex: bpy.types.MeshVertex, bone_by_vgrou
     return elements
 
 
-class VBBuilderDomain(Enum):
-    FACE_CORNER = auto()
-    """Mesh is exported allowing each face corner to have their own set of attributes."""
-    VERTEX = auto()
-    """Mesh is exported only allowing a single set of attributes per vertex. If face corners attached to the vertex
-    have different attributes (vertex colors, UVs, etc.), only the attributes of one of the face corners is used. In the
-    case of normals, the average of the face corner normals is used.
-    """
-
-
 class VertexBufferBuilder:
     """Builds Geometry vertex buffers from a mesh."""
 
@@ -155,8 +168,7 @@ class VertexBufferBuilder:
         bone_by_vgroup: Optional[dict[int, int]] = None,
         domain: VBBuilderDomain = VBBuilderDomain.FACE_CORNER,
         materials: Optional[list[bpy.types.Material]] = None,
-        char_cloth_xml: Optional[CharacterCloth] = None,
-        bones: Optional[list[bpy.types.Bone]] = None,
+        char_cloth: IOCharacterCloth | None = None,
     ):
         self.mesh = mesh
         self.domain = domain
@@ -169,18 +181,19 @@ class VertexBufferBuilder:
         self.mesh.loops.foreach_get("vertex_index", self._loop_to_vert_inds)
 
         if domain == VBBuilderDomain.VERTEX:
-            self._vert_to_loops = []
-            self._vert_to_first_loop = np.empty(len(mesh.vertices), dtype=np.uint32)
-            for vert_index in range(len(mesh.vertices)):
-                loop_indices = np.where(self._loop_to_vert_inds == vert_index)[0]
-                self._vert_to_loops.append(loop_indices.tolist())
-                self._vert_to_first_loop[vert_index] = loop_indices[0]
+            # Find each vertex's first loop by sorting loop indices by their vertex index, then
+            # locating the boundaries between vertices
+            num_verts = len(mesh.vertices)
+            sorted_loop_indices = np.argsort(self._loop_to_vert_inds)
+            sorted_vert_indices = self._loop_to_vert_inds[sorted_loop_indices]
+
+            vert_boundaries = np.searchsorted(sorted_vert_indices, np.arange(num_verts + 1))
+
+            self._vert_to_first_loop = sorted_loop_indices[vert_boundaries[:-1]]
         else:
-            self._vert_to_loops = None
             self._vert_to_first_loop = None
 
-        self._char_cloth = char_cloth_xml
-        self._bones = bones
+        self._char_cloth = char_cloth
 
     def build(self):
         if not self.mesh.loop_triangles:
@@ -220,7 +233,7 @@ class VertexBufferBuilder:
     def _structured_array_from_attrs(self, mesh_attrs: dict[str, NDArray]):
         """Combine ``mesh_attrs`` into single structured array."""
         # Data type for vertex data structured array
-        struct_dtype = [VertexBuffer.VERT_ATTR_DTYPES[attr_name] for attr_name in mesh_attrs]
+        struct_dtype = [STANDARD_VERTEX_ATTR_DTYPES[attr_name] for attr_name in mesh_attrs]
 
         if self.domain == VBBuilderDomain.FACE_CORNER:
             vertex_arr = np.empty(len(self.mesh.loops), dtype=struct_dtype)
@@ -251,14 +264,23 @@ class VertexBufferBuilder:
             return normals
         elif self.domain == VBBuilderDomain.VERTEX:
             num_verts = len(self.mesh.vertices)
-            vertex_normals = np.empty((num_verts, 3), dtype=np.float32)
-            for vert_index in range(num_verts):
-                loops = self._vert_to_loops[vert_index]
-                avg_normal = np.average(normals[loops], axis=0)
-                avg_normal /= np.linalg.norm(avg_normal)
-                vertex_normals[vert_index] = avg_normal
 
-            return vertex_normals
+            # Vectorized accumulation
+            vertex_normals = np.zeros((num_verts, 3), dtype=np.float64)
+            np.add.at(vertex_normals, self._loop_to_vert_inds, normals)
+
+            # Count loops per vertex for averaging
+            loop_counts = np.bincount(self._loop_to_vert_inds, minlength=num_verts)
+
+            vertex_normals /= np.maximum(loop_counts, 1)[:, np.newaxis]
+            norms = np.linalg.norm(vertex_normals, axis=1, keepdims=True)
+            vertex_normals = np.divide(
+                vertex_normals, norms,
+                out=np.zeros_like(vertex_normals),
+                where=norms != 0
+            )
+
+            return vertex_normals.astype(np.float32)
 
     def _get_weights_indices(self) -> Tuple[NDArray[np.uint32], NDArray[np.uint32]]:
         """Get all BlendWeights and BlendIndices."""
@@ -271,22 +293,52 @@ class VertexBufferBuilder:
         cloth_bind_verts = []
         ungrouped_verts = 0
 
-        for i, vert in enumerate(self.mesh.vertices):
-            groups = self._get_sorted_vertex_group_elements(vert)
-            if not groups:
+        # Collect all vertex group data in flat arrays for batch processing
+        vert_indices_list = []
+        bone_indices_list = []
+        weights_list = []
+        slot_indices_list = []
+
+        for vi, vert in enumerate(self.mesh.vertices):
+            vert_groups = vert.groups
+            if not vert_groups:
                 ungrouped_verts += 1
                 continue
 
-            if any(bone_by_vgroup[g.group] == VGROUP_CLOTH_ID for g in groups):
-                cloth_bind_verts.append(i)
+            # Collect valid groups for this vertex
+            valid_groups = []
+            has_cloth = False
+            for ge in vert_groups:
+                bone_index = bone_by_vgroup.get(ge.group, VGROUP_INVALID_BONE_ID)
+                if bone_index == VGROUP_INVALID_BONE_ID:
+                    continue
+                if bone_index == VGROUP_CLOTH_ID:
+                    has_cloth = True
+                    break
+                valid_groups.append((ge.weight, bone_index))
+
+            if has_cloth:
+                cloth_bind_verts.append(vi)
                 continue
 
-            for j, grp in enumerate(groups):
-                if j > 3:
-                    break
+            if not valid_groups:
+                ungrouped_verts += 1
+                continue
 
-                weights_arr[i][j] = grp.weight
-                ind_arr[i][j] = bone_by_vgroup[grp.group]
+            # Sort by weight descending and take top 4
+            valid_groups.sort(reverse=True, key=lambda x: x[0])
+            for j, (weight, bone_idx) in enumerate(valid_groups[:4]):
+                vert_indices_list.append(vi)
+                bone_indices_list.append(bone_idx)
+                weights_list.append(weight)
+                slot_indices_list.append(j)
+
+        # Batch assign to arrays
+        if vert_indices_list:
+            vert_indices = np.array(vert_indices_list, dtype=np.uint32)
+            slot_indices = np.array(slot_indices_list, dtype=np.uint32)
+            weights_arr[vert_indices, slot_indices] = weights_list
+            ind_arr[vert_indices, slot_indices] = bone_indices_list
 
         if ungrouped_verts != 0:
             logger.warning(
@@ -302,7 +354,13 @@ class VertexBufferBuilder:
         weights_arr = self._convert_to_int_range(weights_arr)
         weights_arr = self._renormalize_converted_weights(weights_arr)
 
-        if cloth_bind_verts:
+        if cloth_bind_verts and not self._char_cloth:
+            logger.warning(
+                f"Mesh '{self.mesh.name}' has {len(cloth_bind_verts)} vertices weighted to {CLOTH_CHAR_VERTEX_GROUP_NAME} "
+                f"vertex group but this is not a character cloth! These vertices will not be weighted correctly in-game. "
+                f"Remove {CLOTH_CHAR_VERTEX_GROUP_NAME} vertex group if making a character cloth is not intended."
+            )
+        elif cloth_bind_verts and self._char_cloth:
             cloth_bind_verts_mask = np.zeros(num_verts, dtype=bool)
             cloth_bind_verts_mask[cloth_bind_verts] = 1
 
@@ -323,15 +381,23 @@ class VertexBufferBuilder:
             self.mesh.loop_triangles.foreach_get("vertices", tri_verts)
             tri_verts = tri_verts.reshape((-1, 3))
 
-            mat_is_ped_cloth_mask = np.array([
-                ShaderManager.find_shader(m.shader_properties.filename).is_ped_cloth
-                for m in self.materials
-            ])
+            # `find_shader` returns None for unknown/custom shaders, which are never ped cloth.
+            mat_is_ped_cloth_mask = np.array(
+                [
+                    (shader := ShaderManager.find_shader(m.shader_properties.filename)) is not None
+                    and shader.is_ped_cloth
+                    for m in self.materials
+                ],
+                dtype=bool,
+            )
+
+            if len(mat_is_ped_cloth_mask) == 0:
+                mat_is_ped_cloth_mask = np.zeros(1, dtype=bool)
+            tri_mat_indices %= len(mat_is_ped_cloth_mask)
 
             # Check all triangles with any vertex weighted to CLOTH
             cloth_bind_tris_mask = cloth_bind_verts_mask[tri_verts].any(axis=1)
             cloth_bind_tris_mat_indices = tri_mat_indices[cloth_bind_tris_mask]
-            cloth_bind_tris_mat_indices %= len(mat_is_ped_cloth_mask)
             cloth_bind_tris_mat_not_ped_cloth_mask = ~mat_is_ped_cloth_mask[cloth_bind_tris_mat_indices]
             if cloth_bind_tris_mat_not_ped_cloth_mask.any():
                 n = cloth_bind_tris_mat_not_ped_cloth_mask.sum()
@@ -363,12 +429,10 @@ class VertexBufferBuilder:
             cloth_bind_verts_pos = mesh_verts_pos.reshape((num_verts, 3))[cloth_bind_verts_mask]
             cloth_bind_verts_normal = mesh_verts_normal.reshape((num_verts, 3))[cloth_bind_verts_mask]
 
-            skeleton_centroid = next(b for b in self._char_cloth._tmp_skeleton.bones if b.name ==
-                                     "SKEL_Spine0").translation
-
             cloth_bind_weights_arr, cloth_bind_ind_arr, cloth_bind_errors = cloth_char_get_mesh_to_cloth_bindings(
-                self._char_cloth, cloth_bind_verts_pos, cloth_bind_verts_normal, skeleton_centroid
+                self._char_cloth, cloth_bind_verts_pos, cloth_bind_verts_normal
             )
+
             if cloth_bind_errors:
                 n = len(cloth_bind_errors)
                 logger.error(
@@ -423,14 +487,12 @@ class VertexBufferBuilder:
 
     def _renormalize_converted_weights(self, weights_arr: NDArray[np.uint32]) -> NDArray[np.uint32]:
         """Re-normalize converted weights to ensure their sum to be 255."""
-        row_sums = weights_arr.sum(axis=1, keepdims=True)
-        to_be_subtracted = np.full_like(row_sums, 255, dtype=np.int32)
-        deltas = np.subtract(to_be_subtracted, row_sums)
-        max_indices = weights_arr.argmax(axis=1, keepdims=True)
-        max_values = weights_arr.max(axis=1, keepdims=True)
-        normalized_max_values = np.add(max_values, deltas)
-        result = np.copy(weights_arr)
-        np.put_along_axis(result, max_indices, normalized_max_values, axis=1)
+        row_sums = weights_arr.sum(axis=1)
+        deltas = 255 - row_sums
+        max_indices = weights_arr.argmax(axis=1)
+
+        result = weights_arr.copy()
+        result[np.arange(len(result)), max_indices] += deltas
         return result
 
     def _get_colors(self) -> dict[str, NDArray[np.uint32]]:
@@ -446,11 +508,14 @@ class VertexBufferBuilder:
                 # Not in the correct format, ignore it
                 continue
 
-            colors = np.empty(num_loops * 4, dtype=np.float32)
-            color_attr.data.foreach_get("color_srgb", colors)
+            # Pre-allocate with final shape
+            colors = np.empty((num_loops, 4), dtype=np.float32)
+            color_attr.data.foreach_get("color_srgb", colors.ravel())
 
-            colors = self._convert_to_int_range(colors)
-            colors = np.reshape(colors, (num_loops, 4))
+            # In-place multiply and round to reduce allocations
+            colors *= 255.0
+            np.rint(colors, out=colors)
+            colors = colors.astype(np.uint32)
 
             if self.domain == VBBuilderDomain.VERTEX:
                 colors = colors[self._vert_to_first_loop]
@@ -468,9 +533,9 @@ class VertexBufferBuilder:
             if uvmap_attr is None:
                 continue
 
-            uvs = np.empty(num_loops * 2, dtype=np.float32)
-            uvmap_attr.uv.foreach_get("vector", uvs)
-            uvs = np.reshape(uvs, (num_loops, 2))
+            # Pre-allocate with final shape
+            uvs = np.empty((num_loops, 2), dtype=np.float32)
+            uvmap_attr.uv.foreach_get("vector", uvs.ravel())
 
             flip_uvs(uvs)
 

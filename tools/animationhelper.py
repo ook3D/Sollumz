@@ -6,11 +6,13 @@ from sys import float_info
 from mathutils import Quaternion, Vector, Euler, Matrix
 from enum import IntFlag, IntEnum
 from ..sollumz_properties import MaterialType, SollumType
+from ..sollumz_helper import get_sollumz_materials
 from ..tools import jenkhash
-from .blenderhelper import build_name_bone_map, build_bone_map, get_data_obj
+from .blenderhelper import build_name_bone_map, build_bone_map, get_data_obj, remove_number_suffix
 from .meshhelper import get_uv_map_name
-from typing import Tuple
-from ..cwxml.shader import ShaderManager
+from typing import Tuple, Callable
+from collections.abc import Iterator
+from szio.gta5 import ShaderManager
 
 from .. import logger
 
@@ -172,7 +174,7 @@ PropertyNameToTrackMap = {v: k for k, v in TrackToPropertyNameMap.items()}
 
 def get_quantum_and_min_val(nums):
     min_val = float_info.max
-    max_val = float_info.min
+    max_val = -float_info.max
     min_delta = float_info.max
     last_val = 0
 
@@ -682,7 +684,7 @@ def retarget_animation(animation_obj: bpy.types.Object, old_target_id: bpy.types
 
     # If we have an armature, rename groups named with the bone ID after the bone in the armature
     if new_bone_map is not None:
-        for group in action.groups:
+        for group in action_groups(action):
             name = group.name
             if not name.startswith("#") or not name[1:].isnumeric():
                 continue
@@ -694,7 +696,7 @@ def retarget_animation(animation_obj: bpy.types.Object, old_target_id: bpy.types
 
             group.name = bone.name
 
-    for fcurve in action.fcurves:
+    for fcurve in action_fcurves(action):
         # TODO: can we somehow store the track ID in the F-Curve to avoid parsing the data paths?
         data_path = fcurve.data_path
 
@@ -782,7 +784,7 @@ def update_uv_clip_hash(clip_obj) -> bool:
     animation_obj = clip_obj.clip_properties.animations[0].animation
     target = animation_obj.animation_properties.get_target()
     if not isinstance(target, bpy.types.Material):
-        logger.error(f"Animation target is not a material.")
+        logger.error("Animation target is not a material.")
         return False
 
     meshes = [obj for obj in bpy.data.meshes if obj.user_of_id(target)]
@@ -814,8 +816,9 @@ def update_uv_clip_hash(clip_obj) -> bool:
         else:
             break
 
-    model_name = parent.name
-    material_index = target.shader_properties.index
+    model_name = remove_number_suffix(parent.name).lower()
+    materials = get_sollumz_materials(parent)
+    material_index = materials.index(target)
 
     clip_hash = jenkhash.Generate(model_name) + (material_index + 1)
     clip_hash_str = f"hash_{clip_hash:08X}"
@@ -847,9 +850,62 @@ def get_action_duration_secs(action: bpy.types.Action) -> float:
 
 def get_action_export_frame_count(action: bpy.types.Action) -> int:
     """Gets how many frames should be exported for the given action."""
-    max_num_keyframes = max((len(fc.keyframe_points) for fc in action.fcurves), default=0)
+    max_num_keyframes = max((len(fc.keyframe_points) for fc in action_fcurves(action)), default=0)
     duration_in_frames = get_action_duration_frames(action)
     if max_num_keyframes == 0 or duration_in_frames == 0.0:
         return 0
     num_frames = math.ceil(duration_in_frames + 1)
     return max(max_num_keyframes, num_frames)
+
+
+def action_fcurves(action: bpy.types.Action) -> Iterator[bpy.types.FCurve]:
+    if bpy.app.version >= (5, 0, 0):
+        fcurves = (
+            fcurve
+            for layer in action.layers
+            for strip in layer.strips
+            for channelbag in strip.channelbags
+            for fcurve in channelbag.fcurves
+        )
+    else:
+        fcurves = action.fcurves
+
+    return fcurves
+
+
+def action_groups(action: bpy.types.Action) -> Iterator[bpy.types.ActionGroup]:
+    if bpy.app.version >= (5, 0, 0):
+        groups = (
+            group
+            for layer in action.layers
+            for strip in layer.strips
+            for channelbag in strip.channelbags
+            for group in channelbag.groups
+        )
+    else:
+        groups = action.groups
+
+    return groups
+
+
+def action_remove_fcurves(action: bpy.types.Action, predicate: Callable[[bpy.types.FCurve], bool]):
+    if bpy.app.version >= (5, 0, 0):
+        to_delete = []
+        for layer in action.layers:
+            for strip in layer.strips:
+                for channelbag in strip.channelbags:
+                    to_delete.clear()
+                    for fcurve in channelbag.fcurves:
+                        if predicate(fcurve):
+                            to_delete.append(fcurve)
+
+                    for fcurve in to_delete:
+                        channelbag.fcurves.remove(fcurve)
+    else:
+        to_delete = []
+        for fcurve in action.fcurves:
+            if predicate(fcurve):
+                to_delete.append(fcurve)
+
+        for fcurve in to_delete:
+            action.fcurves.remove(fcurve)

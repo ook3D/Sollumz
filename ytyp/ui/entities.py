@@ -1,7 +1,7 @@
 import bpy
 from ...tabbed_panels import TabbedPanelHelper, TabPanel
 from ..properties.ytyp import ArchetypeType, MloEntitySelectionAccess
-from ..properties.mlo import EntityProperties, MloEntityProperties
+from ..properties.mlo import MloEntityProperties
 from ..utils import get_selected_ytyp, get_selected_archetype, get_selected_entity
 from .extensions import ExtensionsListHelper, ExtensionsPanelHelper
 from .mlo import MloChildTabPanel
@@ -12,6 +12,8 @@ from ...shared.multiselection import (
     MultiSelectUIFlagsPanel,
 )
 from ..operators import ytyp as ytyp_ops
+from ..gta5.presets.mlo_entity import SOLLUMZ_PT_mlo_entity_presets
+from ..gta5.presets.extension import HOST_MLO_ENTITY
 
 
 def entities_filter_items(
@@ -126,9 +128,11 @@ class SOLLUMZ_MT_entities_list_context_menu(bpy.types.Menu):
 
     def draw(self, _context):
         layout = self.layout
-        op = layout.operator(ytyp_ops.SOLLUMZ_OT_archetype_select_all_mlo_entity.bl_idname, text="Select All")
+        op0 = layout.operator(ytyp_ops.SOLLUMZ_OT_archetype_select_all_mlo_entity.bl_idname, text="Select All")
+        op1 = layout.operator(ytyp_ops.SOLLUMZ_OT_archetype_select_invert_mlo_entity.bl_idname, text="Invert")
         if (filter_opts := SOLLUMZ_UL_ENTITIES_LIST.last_filter_options.get("entities_tool_panel", None)):
-            filter_opts.apply_to_operator(op)
+            filter_opts.apply_to_operator(op0)
+            filter_opts.apply_to_operator(op1)
 
 
 class SOLLUMZ_PT_MLO_ENTITY_TAB_PANEL(TabbedPanelHelper, bpy.types.Panel):
@@ -184,6 +188,10 @@ class SOLLUMZ_PT_MLO_ENTITY_PANEL(MloEntityChildTabPanel, bpy.types.Panel):
         active = selected_archetype.entities.active_item
 
         row = layout.row()
+        row.alignment = "RIGHT"
+        SOLLUMZ_PT_mlo_entity_presets.draw_panel_header(row)
+
+        row = layout.row()
         row.enabled = not has_multiple_selection
         row.prop(active, "linked_object")
 
@@ -212,10 +220,12 @@ class SOLLUMZ_PT_MLO_ENTITY_PANEL(MloEntityChildTabPanel, bpy.types.Panel):
             col.prop(active, "scale_z")
             layout.separator()
 
-        for prop_name in EntityProperties.__annotations__:
-            if prop_name == "flags":
-                continue
-            layout.prop(selection.owner, getattr(selection.propnames, prop_name))
+        layout.prop(selection.owner, selection.propnames.archetype_name)
+        layout.prop(selection.owner, selection.propnames.lod_dist)
+        layout.prop(selection.owner, selection.propnames.priority_level)
+        layout.prop(selection.owner, selection.propnames.ambient_occlusion_multiplier)
+        layout.prop(selection.owner, selection.propnames.artificial_ambient_occlusion)
+        layout.prop(selection.owner, selection.propnames.tint_value)
 
 
 class SOLLUMZ_UL_ENTITY_EXTENSIONS_LIST(ExtensionsListHelper, bpy.types.UIList):
@@ -229,6 +239,8 @@ class SOLLUMZ_PT_ENTITY_EXTENSIONS_PANEL(MloEntityChildTabPanel, ExtensionsPanel
     icon = "CON_TRACKTO"
 
     bl_order = 1
+
+    extension_host = HOST_MLO_ENTITY
 
     ADD_OPERATOR_ID = "sollumz.addentityextension"
     DELETE_OPERATOR_ID = "sollumz.deleteentityextension"
@@ -266,4 +278,9 @@ class SOLLUMZ_PT_ENTITY_FLAGS_PANEL(MloEntityChildTabPanel, MultiSelectUIFlagsPa
         # TODO(multiselect): think how we should manage disabling panels when multiple selection enabled
         ytyp = get_selected_ytyp(context)
         self.layout.enabled = not ytyp.archetypes.has_multiple_selection
+
+        row = self.layout.row()
+        row.alignment = "RIGHT"
+        SOLLUMZ_PT_mlo_entity_presets.draw_panel_header(row)
+
         super().draw(context)

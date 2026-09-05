@@ -4,11 +4,12 @@ import itertools
 import random
 from .test_fixtures import BLENDER_LANGUAGES, SOLLUMZ_SHADERS, SOLLUMZ_COLLISION_MATERIALS
 from ..ydr.shader_materials import create_shader
+from ..ydr.operators.materials import MaterialConverter
 from ..ybn.collision_materials import create_collision_material_from_index
-from ..tools.ymaphelper import add_occluder_material
+from ..ynv.navmesh_material import get_navmesh_material
+from ..ymap_next.ymapimport import _get_occluder_material
 from ..sollumz_properties import SollumType
 from ..tools.blenderhelper import find_bsdf_and_material_output, material_from_image
-from ..tools.drawablehelper import MaterialConverter
 
 
 @pytest.fixture(scope="class", params=BLENDER_LANGUAGES)
@@ -33,9 +34,12 @@ class TestAllLanguages:
         mat = create_collision_material_from_index(material_index)
         assert mat is not None
 
-    @pytest.mark.parametrize("sollum_type", (SollumType.YMAP_MODEL_OCCLUDER, SollumType.YMAP_BOX_OCCLUDER))
-    def test_create_occluder_material(self, sollum_type, use_every_language):
-        mat = add_occluder_material(sollum_type)
+    def test_create_navmesh_material(self, use_every_language):
+        mat = get_navmesh_material()
+        assert mat is not None
+
+    def test_create_occluder_material(self, use_every_language):
+        mat = _get_occluder_material()
         assert mat is not None
 
     def test_material_from_image(self, use_every_language):
@@ -45,7 +49,8 @@ class TestAllLanguages:
 
     def test_find_bsdf_and_material_output(self, use_every_language):
         mat = bpy.data.materials.new("Test")
-        mat.use_nodes = True
+        if bpy.app.version < (5, 0, 0):
+            mat.use_nodes = True
         bsdf, mo = find_bsdf_and_material_output(mat)
         assert bsdf is not None
         assert mo is not None
@@ -90,7 +95,10 @@ def test_ops_update_tint_shader_correctly_syncs_attribute_names(plane_object):
     tint_mod = plane_object.modifiers[0]
     tint_output_id = tint_mod.node_group.interface.items_tree.get("Tint Color", None)
     assert tint_output_id
-    tint_attr_name = tint_mod[tint_output_id.identifier + "_attribute_name"]
+    if bpy.app.version >= (5, 2, 0):
+        tint_attr_name = getattr(tint_mod.properties.outputs, tint_output_id.identifier).attribute_name
+    else:
+        tint_attr_name = tint_mod[tint_output_id.identifier + "_attribute_name"]
 
     assert tint_attr_name == tint_attr_node.attribute_name
     assert tint_attr_name in mesh.attributes
@@ -106,7 +114,10 @@ def test_ops_update_tint_shader_correctly_syncs_attribute_names(plane_object):
     # Operator creates new modifiers, get the tint modifier again
     assert len(plane_object.modifiers) == 1
     tint_mod = plane_object.modifiers[0]
-    tint_attr_name = tint_mod[tint_output_id.identifier + "_attribute_name"]
+    if bpy.app.version >= (5, 2, 0):
+        tint_attr_name = getattr(tint_mod.properties.outputs, tint_output_id.identifier).attribute_name
+    else:
+        tint_attr_name = tint_mod[tint_output_id.identifier + "_attribute_name"]
 
     # Check that attribute name updated correctly, in mesh attributes and nodes
     assert tint_attr_name != old_tint_attr_name

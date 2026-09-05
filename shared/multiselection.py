@@ -21,6 +21,7 @@ from bpy.props import (
     CollectionProperty,
     PointerProperty,
     FloatVectorProperty,
+    IntVectorProperty,
 )
 import typing
 from typing import Optional, NamedTuple, Generic, TypeVar
@@ -135,6 +136,13 @@ def _define_multiselect_access(cls: type, collection_name: str, item_cls: type, 
     def _active_item(s: bpy_struct) -> bpy_struct:
         return _resolve_nested(_coll(s).active_item)
 
+    def _wrap_search_cb(search_cb):
+        def _search(self: bpy_struct, context, edit_text: str):
+            active = _active_item(self)
+            return search_cb(active, context, edit_text)
+
+        return _search
+
     def _wrap_basic_property(prop_fn, attr_name: str, **kwargs):
         def _getter(self: bpy_struct):
             return getattr(_active_item(self), attr_name)
@@ -245,14 +253,18 @@ def _define_multiselect_access(cls: type, collection_name: str, item_cls: type, 
             fn = src_annotation.function
             kwargs = dict(src_annotation.keywords)
 
-            # Do not copy the callbacks to the wrapper property
+            # Do not copy these callbacks to the wrapper property
             for callback in ("get", "set", "update"):
                 if callback in kwargs:
                     del kwargs[callback]
 
+            # Wrap search callback, if any
+            if "search" in kwargs:
+                kwargs["search"] = _wrap_search_cb(kwargs["search"])
+
             if fn is EnumProperty:
                 wrapper_prop = _wrap_enum_property(name, **kwargs)
-            elif fn in {BoolProperty, IntProperty, FloatProperty, StringProperty, FloatVectorProperty}:
+            elif fn in {BoolProperty, IntProperty, FloatProperty, StringProperty, IntVectorProperty, FloatVectorProperty}:
                 wrapper_prop = _wrap_basic_property(fn, name, **kwargs)
             elif fn in {PointerProperty}:
                 property_group_cls = kwargs["type"]
@@ -339,6 +351,11 @@ class MultiSelectCollection(Generic[TItem, TItemAccess]):
     def remove(self, index: int):
         self.collection.remove(index)
 
+    def clear(self):
+        self.collection.clear()
+        self.selection_indices.clear()
+        self.active_index = 0
+
     def _on_active_index_update_from_ui(self, value):
         # This callback is only triggered when clicking on the active item in the list once it switched to a textfield
         # instead of buttons
@@ -355,6 +372,13 @@ class MultiSelectCollection(Generic[TItem, TItemAccess]):
 
     def __getitem__(self, index: int) -> TItem:
         return self.collection[index]
+
+    def __iter__(self) -> Iterator[TItem]:
+        # Delegate to bpy_prop_collection's C-level forward iterator, which walks link->next in
+        # O(1) per step. Without this, Python falls back to the sequence protocol via __getitem__,
+        # but CollectionProperty index lookup is done by iterating the linked list until it reaches
+        # the index, causing O(n²) total for a full iteration.
+        return iter(self.collection)
 
     @property
     def has_multiple_selection(self) -> bool:
@@ -457,7 +481,11 @@ class MultiSelectCollection(Generic[TItem, TItemAccess]):
                     # deselect
                     self.selection_indices.remove(index_in_selection)
 
-    def select_all(self, filtered_items: Optional[Sequence[bool]] = None):
+    def select_all(
+        self,
+        filtered_items: Optional[Sequence[bool]] = None,
+        ui_callbacks: bool = False,
+    ):
         if filtered_items:
             assert len(filtered_items) == len(self)
 
@@ -471,12 +499,47 @@ class MultiSelectCollection(Generic[TItem, TItemAccess]):
         if is_active_item_filtered_out and len(self.selection_indices) > 0:
             self.active_index = self.selection_indices[0].index
 
+        if ui_callbacks:
+            self.on_active_index_update_from_ui(bpy.context)
+
+    def select_invert(
+        self,
+        filtered_items: Optional[Sequence[bool]] = None,
+        ui_callbacks: bool = False,
+    ):
+        if filtered_items:
+            assert len(filtered_items) == len(self)
+
+        prev_selection = {s.index for s in self.selection_indices}
+        self.selection_indices.clear()
+        for i in range(len(self)):
+            is_filtered_out = filtered_items and not filtered_items[i]
+            if not is_filtered_out and i not in prev_selection:
+                self.selection_indices.add().index = i
+
+        is_active_item_filtered_out = filtered_items and not filtered_items[self.active_index]
+        if (is_active_item_filtered_out or self.active_index in prev_selection) and len(self.selection_indices) > 0:
+            self.active_index = self.selection_indices[0].index
+
+        if ui_callbacks:
+            self.on_active_index_update_from_ui(bpy.context)
+
     def select_many(self, item_indices: Sequence[int]):
         """Select multiple items by index. First item becomes the active item."""
         self.selection_indices.clear()
         for i in item_indices:
             self.selection_indices.add().index = i
         self.active_index = self.selection_indices[0].index
+
+    def remove_selected(self):
+        """Remove all selected items and reselect the nearest remaining item."""
+        indices = self.selected_items_indices
+        indices.sort(reverse=True)
+        new_active = max(indices[-1] - 1, 0) if indices else 0
+        for i in indices:
+            self.remove(i)
+        if len(self) > 0:
+            self.select(new_active)
 
 
 class MultiSelectOperatorBase:
@@ -487,6 +550,8 @@ class MultiSelectOperatorBase:
     use_filter_sort_reverse: BoolProperty()
     use_filter_sort_alpha: BoolProperty()
     use_filter_invert: BoolProperty()
+
+    trigger_ui_callbacks: BoolProperty(default=False)
 
     def get_collection(self, context) -> MultiSelectCollection:
         raise NotImplementedError("get_collection")
@@ -514,6 +579,10 @@ class MultiSelectOperatorBase:
             self.use_filter_sort_alpha
         )
 
+    def invoke(self, context, event: Event):
+        self.trigger_ui_callbacks = True
+        return self.execute(context)
+
 
 class MultiSelectOneOperator(MultiSelectOperatorBase):
     bl_description = "Select item"
@@ -521,8 +590,6 @@ class MultiSelectOneOperator(MultiSelectOperatorBase):
     index: IntProperty(name="Index")
     extend: BoolProperty(name="Extend")
     toggle: BoolProperty(name="Toggle")
-
-    trigger_ui_callbacks: BoolProperty(default=True)
 
     def execute(self, context):
         collection = self.get_collection(context)
@@ -544,7 +611,7 @@ class MultiSelectOneOperator(MultiSelectOperatorBase):
     def invoke(self, context, event: Event):
         self.extend = event.shift
         self.toggle = event.ctrl
-        return self.execute(context)
+        return super().invoke(context, event)
 
 
 class MultiSelectAllOperator(MultiSelectOperatorBase):
@@ -553,7 +620,17 @@ class MultiSelectAllOperator(MultiSelectOperatorBase):
     def execute(self, context):
         collection = self.get_collection(context)
         filtered_items, _ = self.filter_items(context)
-        collection.select_all(filtered_items=filtered_items)
+        collection.select_all(filtered_items=filtered_items, ui_callbacks=self.trigger_ui_callbacks)
+        return {"FINISHED"}
+
+
+class MultiSelectInvertOperator(MultiSelectOperatorBase):
+    bl_description = "Invert selected items"
+
+    def execute(self, context):
+        collection = self.get_collection(context)
+        filtered_items, _ = self.filter_items(context)
+        collection.select_invert(filtered_items=filtered_items, ui_callbacks=self.trigger_ui_callbacks)
         return {"FINISHED"}
 
 
@@ -646,6 +723,13 @@ class MultiSelectUIListMixin:
             )
             _set_op_properties(op)
 
+        self.draw_item_extra(context, layout, data, item, icon, active_data, active_propname, index)
+
+    def draw_item_extra(
+        self, context, layout: UILayout, data, item, icon, active_data, active_propname, index
+    ):
+        pass
+
     def get_item_icon(self, item) -> str | int:
         return self.default_item_icon
 
@@ -681,7 +765,8 @@ def multiselect_ui_draw_list(
     remove_operator: str,
     uilist_cls: type,
     context_menu_cls: type,
-    list_id: str
+    list_id: str,
+    rows: int = 3,
 ) -> tuple[UILayout, UILayout]:
     from ..sollumz_ui import draw_list_with_add_remove
     full_list_id = f"{collection._collection_propname}{list_id}"
@@ -696,10 +781,11 @@ def multiselect_ui_draw_list(
         uilist_cls.bl_idname, list_id,
         owner, collection._collection_propname,
         owner, collection._active_index_for_ui_propname,
-        rows=3
+        rows=rows
     )
 
-    side_col.separator()
+    if add_operator or remove_operator:
+        side_col.separator()
     side_col.menu(context_menu_cls.bl_idname, icon="DOWNARROW_HLT", text="")
 
     return list_col, side_col

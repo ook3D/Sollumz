@@ -2,16 +2,18 @@ import bpy
 from bpy.types import (
     Object,
     PropertyGroup,
+    Collection,
 )
 from bpy.props import (
     BoolProperty,
 )
 from enum import IntEnum
+from collections.abc import Iterator
 from typing import Union, Optional, Sequence
 from uuid import uuid4
 
 from ...sollumz_preferences import get_addon_preferences
-from ...tools.blenderhelper import get_children_recursive
+from ...tools.blenderhelper import get_children_recursive, tag_redraw
 from ...sollumz_properties import SollumType, items_from_enums, ArchetypeType, AssetType, TimeFlagsMixin, SOLLUMZ_UI_NAMES
 from ...tools.utils import get_list_item
 from .mlo import EntitySetProperties, RoomProperties, PortalProperties, MloEntityProperties, TimecycleModifierProperties
@@ -220,20 +222,13 @@ class MloEntityFlagsSelectionAccess(MultiSelectNestedAccess):
 
 
 class MloEntitySelectionAccess(MultiSelectAccess):
-    # from EntityProperties
     archetype_name: MultiSelectProperty()
-    guid: MultiSelectProperty()
-    parent_index: MultiSelectProperty()
     lod_dist: MultiSelectProperty()
-    child_lod_dist: MultiSelectProperty()
-    lod_level: MultiSelectProperty()
-    num_children: MultiSelectProperty()
     priority_level: MultiSelectProperty()
     ambient_occlusion_multiplier: MultiSelectProperty()
     artificial_ambient_occlusion: MultiSelectProperty()
     tint_value: MultiSelectProperty()
 
-    # from MloEntityProperties
     attached_portal_id: MultiSelectProperty()
     attached_room_id: MultiSelectProperty()
     attached_entity_set_id: MultiSelectProperty()
@@ -263,6 +258,11 @@ class EntitySetSelectionAccess(MultiSelectAccess):
 class ArchetypeProperties(bpy.types.PropertyGroup, ExtensionsContainer):
     IS_ARCHETYPE = True
     DEFAULT_EXTENSION_TYPE = ExtensionType.PARTICLE
+
+    __sz_preset_capture__ = (
+        "lod_dist", "hd_texture_dist", "special_attribute",
+        "flags", "time_flags", "mlo_flags",
+    )
 
     __portal_enum_items_cache: dict[str, list] = {}
     __room_enum_items_cache: dict[str, list] = {}
@@ -294,7 +294,8 @@ class ArchetypeProperties(bpy.types.PropertyGroup, ExtensionsContainer):
                     # Check for embedded textures
                     if child.sollum_type == SollumType.DRAWABLE_GEOMETRY:
                         for mat in child.data.materials:
-                            if not mat.use_nodes:
+                            use_nodes = mat.use_nodes if bpy.app.version < (5, 0, 0) else True
+                            if not use_nodes:
                                 continue
                             for node in mat.node_tree.nodes:
                                 if isinstance(node, bpy.types.ShaderNodeTexImage):
@@ -431,18 +432,36 @@ class ArchetypeProperties(bpy.types.PropertyGroup, ExtensionsContainer):
     def on_entities_active_index_update_from_ui(self, context):
         self.select_entity_linked_object()
 
+    def on_rooms_active_index_update_from_ui(self, context):
+        if context.scene.show_room_gizmo:
+            tag_redraw(context, space_type="VIEW_3D", region_type="WINDOW")
+
+    def on_portals_active_index_update_from_ui(self, context):
+        if context.scene.show_portal_gizmo:
+            tag_redraw(context, space_type="VIEW_3D", region_type="WINDOW")
+
+    def on_timecycle_modifiers_active_index_update_from_ui(self, context):
+        if context.scene.show_mlo_tcm_gizmo:
+            tag_redraw(context, space_type="VIEW_3D", region_type="WINDOW")
+
+    def _on_texture_dictionary_search(self, context, _edit_text: str) -> Iterator[str]:
+        yield from (txd.name for txd in context.scene.sz_txds.texture_dictionaries)
+
     bb_min: bpy.props.FloatVectorProperty(name="Bound Min")
     bb_max: bpy.props.FloatVectorProperty(name="Bound Max")
     bs_center: bpy.props.FloatVectorProperty(name="Bound Center")
     bs_radius: bpy.props.FloatProperty(name="Bound Radius")
     type: bpy.props.EnumProperty(items=items_from_enums(ArchetypeType), name="Type")
-    lod_dist: bpy.props.FloatProperty(name="Lod Distance", default=200, min=-1)
+    lod_dist: bpy.props.FloatProperty(name="LOD Distance", default=200, min=-1)
     flags: bpy.props.PointerProperty(type=ArchetypeFlags, name="Flags")
     special_attribute: bpy.props.EnumProperty(
         name="Special Attribute", items=SpecialAttributeEnumItems, default=SpecialAttribute.NOTHING_SPECIAL.name)
     hd_texture_dist: bpy.props.FloatProperty(name="HD Texture Distance", default=100, min=0)
     name: bpy.props.StringProperty(name="Name")
-    texture_dictionary: bpy.props.StringProperty(name="Texture Dictionary")
+    texture_dictionary: bpy.props.StringProperty(
+        name="Texture Dictionary",
+        search=_on_texture_dictionary_search, search_options={"SUGGESTION"},
+    )
     clip_dictionary: bpy.props.StringProperty(name="Clip Dictionary")
     drawable_dictionary: bpy.props.StringProperty(name="Drawable Dictionary")
     physics_dictionary: bpy.props.StringProperty(name="Physics Dictionary")
@@ -458,6 +477,8 @@ class ArchetypeProperties(bpy.types.PropertyGroup, ExtensionsContainer):
     entities: MultiSelectCollection[MloEntityProperties, MloEntitySelectionAccess]
     timecycle_modifiers: MultiSelectCollection[TimecycleModifierProperties, TimecycleModifierSelectionAccess]
     entity_sets: MultiSelectCollection[EntitySetProperties, EntitySetSelectionAccess]
+
+    mlo_collection_for_instancing: bpy.props.PointerProperty(type=Collection, name="Collection for Instancing")
 
     id: bpy.props.IntProperty(default=-1)
     uuid: bpy.props.StringProperty(name="UUID", maxlen=36)  # unique within the whole .blend
@@ -546,6 +567,23 @@ class ArchetypeProperties(bpy.types.PropertyGroup, ExtensionsContainer):
     def update_cached_entity_set_enum_items(archetype_uuid: str) -> Optional[list]:
         if archetype_uuid in ArchetypeProperties.__entity_set_enum_items_cache:
             del ArchetypeProperties.__entity_set_enum_items_cache[archetype_uuid]
+
+    def calc_num_exit_portals(self) -> int | None:
+        if self.type != ArchetypeType.MLO:
+            return None
+
+        num_exit_portals = 0
+        for p in self.portals:
+            link_interiors = p.flags.flag2
+            # Note, cannot use `room_to/from_index/id` properties here because their getters depend on having the
+            # correct context such that this archetype is the currently selected one, which may not be the case when
+            # this function is called (e.g. it is used from maps UI, so archetypes UI may be in whatever random state
+            # with something else selected).
+            # The name properties store the names themselves and should be in sync with the other properties
+            if (not link_interiors and (p.room_to_name == "limbo" or p.room_from_name == "limbo")):
+                num_exit_portals += 1
+
+        return num_exit_portals
 
 
 class ArchetypeFlagsSelectionAccess(MultiSelectNestedAccess):
@@ -682,7 +720,7 @@ class CMapTypesProperties(PropertyGroup):
                     entity_set.mlo_archetype_id = archetype.id
                     entity_set.mlo_archetype_uuid = archetype.uuid
 
-    def new_archetype(self, archetype_type: ArchetypeType = ArchetypeType.BASE):
+    def new_archetype(self, archetype_type: ArchetypeType = ArchetypeType.BASE) -> ArchetypeProperties:
         item = self.archetypes.add()
         index = len(self.archetypes) - 1
         self.archetypes.select(index)

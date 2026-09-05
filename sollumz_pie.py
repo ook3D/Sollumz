@@ -23,21 +23,22 @@ class SOLLUMZ_MT_pie_menu(Menu):
         pie.operator("sollumz.addobjasentity", icon='OBJECT_DATA')
 
         # Bottom
-        pie.operator("sollumz.load_flag_preset",
-                     text="Apply Flag Preset", icon='ALIGN_TOP')
+        pie.separator()
         # Top
-        pie.operator("file.find_missing_files",
-                     text="Find Missing Textures", icon='VIEWZOOM')
+        col = pie.column()
+        col.emboss = "PIE_MENU" if bpy.app.version >= (5, 0, 0) else "RADIAL_MENU"
+        col.scale_x = 1.1
+        col.scale_y = 1.4
+        col.operator("file.find_missing_files", text="Find Missing Textures", icon='VIEWZOOM')
+        col.operator("sollumz.txd_find_missing", icon="BLANK1")
         # Top-left
-        pie.operator("sollumz.import_assets",
-                     text="Import CodeWalker XML", icon='IMPORT')
+        pie.operator("sollumz.import_assets", icon="IMPORT")
         # Top-right
+        op = pie.operator("sollumz.export_assets", icon="EXPORT")
         if context.scene.sollumz_export_path != "":
-            op = pie.operator("sollumz.export_assets", text="Export CodeWalker XML", icon='EXPORT')
             op.directory = context.scene.sollumz_export_path
             op.direct_export = True
-        else:
-            pie.operator("sollumz.export_assets", text="Export CodeWalker XML", icon='EXPORT')
+
         # Bottom-left
         pie.operator("sollumz.converttodrawable", icon='CUBE')
         # Bottom-right

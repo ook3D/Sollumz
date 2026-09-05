@@ -1,7 +1,22 @@
-import os
 import itertools
-from typing import Optional
+import os
+import re
+from collections import defaultdict
+from contextlib import AbstractContextManager
+from functools import wraps
 from pathlib import Path
+from typing import Optional
+
+import bpy
+import pytest
+from bpy.types import (
+    BlendData,
+)
+
+from ..logger import (
+    LoggerBase,
+    use_logger,
+)
 
 
 def get_env_path(name: str) -> Optional[Path]:
@@ -19,6 +34,7 @@ def get_env_path(name: str) -> Optional[Path]:
 SOLLUMZ_TEST_TMP_DIR = get_env_path("SOLLUMZ_TEST_TMP_DIR")
 SOLLUMZ_TEST_GAME_ASSETS_DIR = get_env_path("SOLLUMZ_TEST_GAME_ASSETS_DIR")
 SOLLUMZ_TEST_ASSETS_DIR = Path(__file__).parent.joinpath("assets/")
+SOLLUMZ_TEST_DATA_DIR = Path(__file__).parent.joinpath("data/")
 
 
 def is_tmp_dir_available() -> bool:
@@ -48,7 +64,158 @@ def glob_assets(ext: str) -> list[tuple[Path, str]]:
     return list(map(lambda p: (p, str(p)), assets))
 
 
-def asset_path(file_name: str) -> Path:
-    path = SOLLUMZ_TEST_ASSETS_DIR.joinpath(file_name)
+def asset_path(*path_segments: str) -> Path:
+    path = SOLLUMZ_TEST_ASSETS_DIR.joinpath(*path_segments)
     assert path.exists()
     return path
+
+
+def data_path(*path_segments: str) -> Path:
+    path = SOLLUMZ_TEST_DATA_DIR.joinpath(*path_segments)
+    assert path.exists()
+    return path
+
+
+def load_blend_data(file_name: str) -> BlendData:
+    bpy.ops.wm.open_mainfile(filepath=str(data_path(file_name)))
+    return bpy.data
+
+
+def _is_szio_native_available() -> bool:
+    import szio.gta5.native
+    return szio.gta5.native.IS_BACKEND_AVAILABLE
+
+
+requires_szio_native = pytest.mark.skipif(
+    not _is_szio_native_available(),
+    reason="test requires szio native backend to be available"
+)
+
+del _is_szio_native_available
+
+
+def make_bc1_dds(width: int, height: int, mip_count: int) -> bytes:
+    """Builds a synthetic DXT1 DDS with `mip_count` mip levels, each filled with a distinct byte."""
+    from szio.dds import DDS_HEADER
+
+    mip_sizes = []
+    w, h = width, height
+    for _ in range(mip_count):
+        mip_sizes.append(max(1, (w + 3) // 4) * max(1, (h + 3) // 4) * 8)
+        w = max(1, w // 2)
+        h = max(1, h // 2)
+
+    header = DDS_HEADER()
+    header.dwSize = 124
+    flags = 0x1 | 0x2 | 0x4 | 0x1000 | 0x80000  # CAPS | HEIGHT | WIDTH | PIXELFORMAT | LINEARSIZE
+    if mip_count > 1:
+        flags |= 0x20000  # MIPMAPCOUNT
+    header.dwFlags = flags
+    header.dwWidth = width
+    header.dwHeight = height
+    header.dwPitchOrLinearSize = mip_sizes[0]
+    header.dwMipMapCount = mip_count
+    header.ddspf.dwSize = 32
+    header.ddspf.dwFlags = 0x4  # DDPF_FOURCC
+    header.ddspf.dwFourCC = b"DXT1"
+    header.dwCaps = 0x1000 | 0x8 | 0x400000  # TEXTURE | COMPLEX | MIPMAP
+    blob = bytearray(b"DDS ") + bytes(header)
+    blob += b"".join(bytes([0x10 + i]) * size for i, size in enumerate(mip_sizes))
+    return bytes(blob)
+
+
+def new_packed_dds_image(name: str, dds: bytes, filename: str = "") -> bpy.types.Image:
+    img = bpy.data.images.new(name=name, width=1, height=1)
+    img.source = "FILE"
+    img.filepath = f"//{filename or name}"
+    img.pack(data=dds, data_len=len(dds))
+    return img
+
+
+def dropped_mip(dds: bytes) -> bytes:
+    """DDS bytes of `dds` with the top mip level removed."""
+    from szio.dds import DdsFile
+
+    return DdsFile.from_buffer(bytearray(dds)).drop_mip()
+
+
+def assert_dds_is_full_res(dds_bytes: bytes, expected_resolution: tuple[int, int]):
+    from szio.dds import DdsFile
+
+    dds = DdsFile.from_buffer(bytearray(dds_bytes))
+    assert dds.resolution == expected_resolution
+    # make_bc1_dds fills the base mip with 0x10; a mip-dropped copy would start with 0x11
+    assert bytes(dds.pixel_data[:8]) == b"\x10" * 8
+
+
+class TestLogger(LoggerBase):
+    def __init__(self):
+        self._logs: dict[str, list[str]] = defaultdict(list)
+
+    def do_log(self, msg: str, level: str):
+        self._logs[level].append(msg)
+
+    def reset(self):
+        self._logs.clear()
+
+    @property
+    def infos(self) -> list[str]:
+        return self._logs["INFO"]
+
+    @property
+    def warnings(self) -> list[str]:
+        return self._logs["WARNING"]
+
+    @property
+    def errors(self) -> list[str]:
+        return self._logs["ERROR"]
+
+    @property
+    def has_warnings_or_errors(self) -> bool:
+        return bool(self.warnings or self.errors)
+
+    @property
+    def has_errors(self) -> bool:
+        return bool(self.errors)
+
+    def assert_no_warnings_or_errors(self):
+        assert not self.has_warnings_or_errors, \
+            f"{len(self.warnings)} warning(s), {len(self.errors)} error(s)"
+
+    def assert_no_errors(self):
+        assert not self.has_errors, \
+            f"{len(self.errors)} error(s)"
+
+    def assert_warning(self, *, match: str | re.Pattern[str] | None = None, num: int = 1):
+        warnings = self.warnings
+        assert len(warnings) == num, f"Expected {num} warning(s), got {len(warnings)} warning(s)"
+        if match is not None:
+            assert any(re.search(match, w) for w in warnings), f"Expected warning to match {match!r}."
+
+
+def log_capture() -> AbstractContextManager[TestLogger]:
+    return use_logger(TestLogger())
+
+
+def assert_logs_no_warnings_or_errors(func):
+    """Decorator that asserts that no user-facing warnings or errors were logged."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with log_capture() as logs:
+            result = func(*args, **kwargs)
+        logs.assert_no_warnings_or_errors()
+        return result
+
+    return wrapper
+
+
+def assert_logs_no_errors(func):
+    """Decorator that asserts that no user-facing errors were logged."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with log_capture() as logs:
+            result = func(*args, **kwargs)
+        logs.assert_no_errors()
+        return result
+
+    return wrapper

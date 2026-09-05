@@ -1,15 +1,7 @@
 import bpy
-from ...sollumz_ui import BasicListHelper, SollumzFileSettingsPanel, draw_list_with_add_remove
+from ...sollumz_ui import BasicListHelper, NoVisibilityToggle, draw_list_with_add_remove
 from ...sollumz_properties import ArchetypeType
-from ...sollumz_preferences import (
-    get_import_settings,
-    get_export_settings,
-    SollumzImportSettings,
-    SollumzExportSettings
-)
-from ..utils import (
-    get_selected_ytyp,
-)
+from ..utils import get_selected_ytyp
 from ...shared.multiselection import (
     MultiSelectUIListMixin,
     multiselect_ui_draw_list,
@@ -39,7 +31,7 @@ class SOLLUMZ_PT_YTYP_TOOL_PANEL(bpy.types.Panel):
         ...
 
 
-class YtypToolChildPanel:
+class YtypToolChildPanel(NoVisibilityToggle):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_parent_id = SOLLUMZ_PT_YTYP_TOOL_PANEL.bl_idname
@@ -54,33 +46,10 @@ class SOLLUMZ_PT_YTYP_LIST_PANEL(YtypToolChildPanel, bpy.types.Panel):
     def draw(self, context):
         list_col, _ = draw_list_with_add_remove(self.layout, "sollumz.createytyp", "sollumz.deleteytyp",
                                                 SOLLUMZ_UL_YTYP_LIST.bl_idname, "", context.scene, "ytyps", context.scene, "ytyp_index", rows=3)
+
         row = list_col.row()
-        row.operator("sollumz.importytyp", icon="IMPORT")
-        row.operator("sollumz.exportytyp", icon="EXPORT")
-
-
-class SOLLUMZ_PT_import_ytyp(bpy.types.Panel, SollumzFileSettingsPanel):
-    bl_options = {"HIDE_HEADER"}
-    operator_id = "SOLLUMZ_OT_importytyp"
-
-    def get_settings(self, context: bpy.types.Context) -> SollumzImportSettings:
-        return get_import_settings(context)
-
-    def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzImportSettings):
-        layout.use_property_split = False
-        layout.prop(settings, "ytyp_mlo_instance_entities")
-
-
-class SOLLUMZ_PT_export_ytyp(bpy.types.Panel, SollumzFileSettingsPanel):
-    bl_options = {"HIDE_HEADER"}
-    operator_id = "SOLLUMZ_OT_exportytyp"
-
-    def get_settings(self, context: bpy.types.Context) -> SollumzExportSettings:
-        return get_export_settings(context)
-
-    def draw_settings(self, layout: bpy.types.UILayout, settings: SollumzExportSettings):
-        layout.use_property_split = False
-        layout.prop(settings, "apply_transforms")
+        row.operator(ytyp_ops.SOLLUMZ_OT_import_ytyp_io.bl_idname, icon="IMPORT")
+        row.operator(ytyp_ops.SOLLUMZ_OT_export_ytyp_io.bl_idname, icon="EXPORT")
 
 
 class SOLLUMZ_UL_ARCHETYPE_LIST(MultiSelectUIListMixin, bpy.types.UIList):
@@ -130,6 +99,8 @@ class SOLLUMZ_MT_archetype_list_context_menu(bpy.types.Menu):
 
     def draw(self, _context):
         layout = self.layout
-        op = layout.operator(ytyp_ops.SOLLUMZ_OT_ytyp_select_all_archetypes.bl_idname, text="Select All")
+        op0 = layout.operator(ytyp_ops.SOLLUMZ_OT_ytyp_select_all_archetypes.bl_idname, text="Select All")
+        op1 = layout.operator(ytyp_ops.SOLLUMZ_OT_ytyp_select_invert_archetypes.bl_idname, text="Invert")
         if (filter_opts := SOLLUMZ_UL_ARCHETYPE_LIST.last_filter_options.get("archetypes_tool_panel", None)):
-            filter_opts.apply_to_operator(op)
+            filter_opts.apply_to_operator(op0)
+            filter_opts.apply_to_operator(op1)

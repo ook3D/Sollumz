@@ -6,7 +6,8 @@ from bpy.types import Operator
 from abc import ABC, abstractmethod
 from typing import Sequence, Iterator
 from collections import defaultdict
-from contextlib import contextmanager
+from contextlib import contextmanager, AbstractContextManager
+import logging
 
 
 class LoggerBase(ABC):
@@ -69,7 +70,7 @@ def use_logger(logger: LoggerBase) -> Iterator[LoggerBase]:
         _root_logger.remove_logger(logger)
 
 
-def use_operator_logger(operator: Operator) -> Iterator[OperatorLogger]:
+def use_operator_logger(operator: Operator) -> AbstractContextManager[OperatorLogger]:
     return use_logger(OperatorLogger(operator))
 
 
@@ -83,3 +84,15 @@ def warning(msg: str):
 
 def error(msg: str):
     _log(msg, "ERROR")
+
+
+class LoggingHandlerRedirectToSollumzLogger(logging.Handler):
+    def emit(self, record):
+        msg = self.format(record)
+        level = record.levelno
+        if level >= logging.ERROR:
+            error(msg)
+        elif level >= logging.WARNING:
+            warning(msg)
+        else:
+            info(msg)

@@ -2,6 +2,7 @@ import bpy
 from enum import Enum
 from typing import Sequence
 from .tools.utils import flag_list_to_int, flag_prop_to_list, int_to_bool_list
+from szio.gta5 import LodLevel as IOLodLevel, LightType as IOLightType
 
 
 # NOTE: Do not reorder these enums or insert new entries in the middle. That will break compatibility with
@@ -51,14 +52,14 @@ class SollumType(str, Enum):
     ANIMATIONS = "sollumz_animations"
     ANIMATION = "sollumz_animation"
 
-    YMAP = "sollumz_ymap"
-    YMAP_ENTITY_GROUP = "sollumz_ymap_entity_group"
-    YMAP_BOX_OCCLUDER_GROUP = "sollumz_ymap_box_occluder_group"
-    YMAP_MODEL_OCCLUDER_GROUP = "sollumz_ymap_model_occluder_group"
-    YMAP_CAR_GENERATOR_GROUP = "sollumz_ymap_car_generator_group"
-    YMAP_BOX_OCCLUDER = "sollumz_ymap_box_occluder"
-    YMAP_MODEL_OCCLUDER = "sollumz_ymap_model_occluder"
-    YMAP_CAR_GENERATOR = "sollumz_ymap_car_generator"
+    DEPRECATED__YMAP = "sollumz_ymap"
+    DEPRECATED__YMAP_ENTITY_GROUP = "sollumz_ymap_entity_group"
+    DEPRECATED__YMAP_BOX_OCCLUDER_GROUP = "sollumz_ymap_box_occluder_group"
+    DEPRECATED__YMAP_MODEL_OCCLUDER_GROUP = "sollumz_ymap_model_occluder_group"
+    DEPRECATED__YMAP_CAR_GENERATOR_GROUP = "sollumz_ymap_car_generator_group"
+    DEPRECATED__YMAP_BOX_OCCLUDER = "sollumz_ymap_box_occluder"
+    DEPRECATED__YMAP_MODEL_OCCLUDER = "sollumz_ymap_model_occluder"
+    DEPRECATED__YMAP_CAR_GENERATOR = "sollumz_ymap_car_generator"
 
     CHARACTER_CLOTH_MESH = "sollumz_character_cloth_mesh"
 
@@ -69,12 +70,37 @@ class LightType(str, Enum):
     SPOT = "sollumz_light_spot"
     CAPSULE = "sollumz_light_capsule"
 
+    def to_io(self) -> IOLightType:
+        match self:
+            case LightType.POINT:
+                return IOLightType.POINT
+            case LightType.SPOT:
+                return IOLightType.SPOT
+            case LightType.CAPSULE:
+                return IOLightType.CAPSULE
+            case LightType.NONE:
+                raise ValueError("Cannot to convert NONE to asset I/O format")
+            case _:
+                raise ValueError(f"Unknown light type '{self}'")
+
+    @staticmethod
+    def from_io(light_type: IOLightType) -> "LightType":
+        match light_type:
+            case IOLightType.POINT:
+                return LightType.POINT
+            case IOLightType.SPOT:
+                return LightType.SPOT
+            case IOLightType.CAPSULE:
+                return LightType.CAPSULE
+            case _:
+                raise ValueError(f"Unknown light type '{light_type}'")
+
 
 class MaterialType(str, Enum):
     NONE = "sollumz_material_none",
     SHADER = "sollumz_material_shader",
     COLLISION = "sollumz_material_collision"
-    SHATTER_MAP = "sollumz_material_shard"
+    DEPRECATED__SHATTER_MAP = "sollumz_material_shard"  # unused
 
 
 class LODLevel(str, Enum):
@@ -83,6 +109,35 @@ class LODLevel(str, Enum):
     MEDIUM = "sollumz_medium"
     LOW = "sollumz_low"
     VERYLOW = "sollumz_verylow"
+
+    def to_io(self) -> IOLodLevel:
+        match self:
+            case LODLevel.HIGH:
+                return IOLodLevel.HIGH
+            case LODLevel.MEDIUM:
+                return IOLodLevel.MEDIUM
+            case LODLevel.LOW:
+                return IOLodLevel.LOW
+            case LODLevel.VERYLOW:
+                return IOLodLevel.VERYLOW
+            case LODLevel.VERYHIGH:
+                return IOLodLevel.HIGH
+            case _:
+                raise ValueError(f"Unknown LOD '{self}'")
+
+    @staticmethod
+    def from_io(lod_level: IOLodLevel) -> "LODLevel":
+        match lod_level:
+            case IOLodLevel.HIGH:
+                return LODLevel.HIGH
+            case IOLodLevel.MEDIUM:
+                return LODLevel.MEDIUM
+            case IOLodLevel.LOW:
+                return LODLevel.LOW
+            case IOLodLevel.VERYLOW:
+                return LODLevel.VERYLOW
+            case _:
+                raise ValueError(f"Unknown LOD '{lod_level}'")
 
 
 LODLevelEnumItems = (
@@ -118,7 +173,7 @@ class ArchetypeType(str, Enum):
 
 
 class AssetType(str, Enum):
-    UNITIALIZED = "sollumz_asset_unintialized"
+    UNINITIALIZED = "sollumz_asset_uninitialized"
     FRAGMENT = "sollumz_asset_fragment"
     DRAWABLE = "sollumz_asset_drawable"
     DRAWABLE_DICTIONARY = "sollumz_asset_drawable_dictionary"
@@ -202,18 +257,6 @@ DRAWABLE_TYPES = [
 ]
 
 
-YMAP_GROUP_TYPES = [
-    SollumType.YMAP,
-    SollumType.YMAP_ENTITY_GROUP,
-    SollumType.YMAP_BOX_OCCLUDER_GROUP,
-    SollumType.YMAP_MODEL_OCCLUDER_GROUP,
-    SollumType.YMAP_CAR_GENERATOR_GROUP,
-    SollumType.YMAP_BOX_OCCLUDER,
-    SollumType.YMAP_MODEL_OCCLUDER,
-    SollumType.YMAP_CAR_GENERATOR,
-]
-
-
 SOLLUMZ_UI_NAMES = {
     SollumType.BOUND_BOX: "Bound Box",
     SollumType.BOUND_SPHERE: "Bound Sphere",
@@ -259,19 +302,19 @@ SOLLUMZ_UI_NAMES = {
     SollumType.ANIMATIONS: "Animations",
     SollumType.ANIMATION: "Animation",
 
-    SollumType.YMAP: "Ymap",
-    SollumType.YMAP_ENTITY_GROUP: "Entity Group",
-    SollumType.YMAP_BOX_OCCLUDER_GROUP: "Box Occluder Group",
-    SollumType.YMAP_MODEL_OCCLUDER_GROUP: "Model Occluder Group",
-    SollumType.YMAP_CAR_GENERATOR_GROUP: "Car Generator Group",
-    SollumType.YMAP_BOX_OCCLUDER: "Box Occluder",
-    SollumType.YMAP_MODEL_OCCLUDER: "Model Occluder",
-    SollumType.YMAP_CAR_GENERATOR: "Car Generator",
+    SollumType.DEPRECATED__YMAP: "(Deprecated) Ymap",
+    SollumType.DEPRECATED__YMAP_ENTITY_GROUP: "(Deprecated) Entity Group",
+    SollumType.DEPRECATED__YMAP_BOX_OCCLUDER_GROUP: "(Deprecated) Box Occluder Group",
+    SollumType.DEPRECATED__YMAP_MODEL_OCCLUDER_GROUP: "(Deprecated) Model Occluder Group",
+    SollumType.DEPRECATED__YMAP_CAR_GENERATOR_GROUP: "(Deprecated) Car Generator Group",
+    SollumType.DEPRECATED__YMAP_BOX_OCCLUDER: "(Deprecated) Box Occluder",
+    SollumType.DEPRECATED__YMAP_MODEL_OCCLUDER: "(Deprecated) Model Occluder",
+    SollumType.DEPRECATED__YMAP_CAR_GENERATOR: "(Deprecated) Car Generator",
 
     MaterialType.NONE: "None",
     MaterialType.SHADER: "Sollumz Material",
     MaterialType.COLLISION: "Sollumz Collision Material",
-    MaterialType.SHATTER_MAP: "Sollumz Shatter Map",
+    MaterialType.DEPRECATED__SHATTER_MAP: "(Deprecated) Sollumz Shatter Map",
 
     LODLevel.VERYHIGH: "Very High",
     LODLevel.HIGH: "High",
@@ -279,13 +322,13 @@ SOLLUMZ_UI_NAMES = {
     LODLevel.LOW: "Low",
     LODLevel.VERYLOW: "Very Low",
 
-    EntityLodLevel.LODTYPES_DEPTH_HD: "DEPTH HD",
-    EntityLodLevel.LODTYPES_DEPTH_LOD: "DEPTH LOD",
-    EntityLodLevel.LODTYPES_DEPTH_SLOD1: "DEPTH SLOD1",
-    EntityLodLevel.LODTYPES_DEPTH_SLOD2: "DEPTH SLOD2",
-    EntityLodLevel.LODTYPES_DEPTH_SLOD3: "DEPTH SLOD3",
-    EntityLodLevel.LODTYPES_DEPTH_SLOD4: "DEPTH SLOD4",
-    EntityLodLevel.LODTYPES_DEPTH_ORPHANHD: "DEPTH ORPHAN HD",
+    EntityLodLevel.LODTYPES_DEPTH_HD: "HD",
+    EntityLodLevel.LODTYPES_DEPTH_LOD: "LOD",
+    EntityLodLevel.LODTYPES_DEPTH_SLOD1: "SLOD1",
+    EntityLodLevel.LODTYPES_DEPTH_SLOD2: "SLOD2",
+    EntityLodLevel.LODTYPES_DEPTH_SLOD3: "SLOD3",
+    EntityLodLevel.LODTYPES_DEPTH_SLOD4: "SLOD4",
+    EntityLodLevel.LODTYPES_DEPTH_ORPHANHD: "ORPHAN HD",
 
     EntityPriorityLevel.PRI_REQUIRED: "REQUIRED",
     EntityPriorityLevel.PRI_OPTIONAL_HIGH: "OPTIONAL HIGH",
@@ -301,7 +344,7 @@ SOLLUMZ_UI_NAMES = {
     ArchetypeType.TIME: "Time",
     ArchetypeType.MLO: "MLO",
 
-    AssetType.UNITIALIZED: "Uninitialized",
+    AssetType.UNINITIALIZED: "Uninitialized",
     AssetType.FRAGMENT: "Fragment",
     AssetType.DRAWABLE: "Drawable",
     AssetType.DRAWABLE_DICTIONARY: "Drawable Dictionary",
@@ -377,6 +420,9 @@ class FlagPropertyGroup:
 
     total: bpy.props.StringProperty(name="Flags", update=update_flags_total, default="0")
 
+    # Preset capture/apply only round-trips `total`, setting it updates all the per-flag BoolProperty fields
+    __sz_preset_capture__ = ("total",)
+
 
 time_items = [("0", "12:00 AM", ""),
               ("1", "1:00 AM", ""),
@@ -436,7 +482,7 @@ class TimeFlagsMixin(FlagPropertyGroup):
     time_flags_end: bpy.props.EnumProperty(items=time_items, name="Time End")
 
 
-class EntityProperties:
+class ObjectEntityProperties(bpy.types.PropertyGroup):
     archetype_name: bpy.props.StringProperty(name="Archetype Name")
     flags: bpy.props.IntProperty(name="Flags", default=32)
     guid: bpy.props.FloatProperty(name="GUID")
@@ -461,10 +507,6 @@ class EntityProperties:
     artificial_ambient_occlusion: bpy.props.FloatProperty(
         name="Artificial Ambient Occlusion", default=255)
     tint_value: bpy.props.FloatProperty(name="Tint Value")
-
-
-class ObjectEntityProperties(bpy.types.PropertyGroup, EntityProperties):
-    pass
 
 
 def register():
@@ -541,27 +583,11 @@ def register():
         size=4
     )
 
-    bpy.types.Scene.vert_paint_alpha = bpy.props.FloatProperty(
-        name="Alpha", min=-1, max=1)
-
-    bpy.types.Scene.debug_sollum_type = bpy.props.EnumProperty(
-        items=[(SollumType.DRAWABLE.value, SOLLUMZ_UI_NAMES[SollumType.DRAWABLE], SOLLUMZ_UI_NAMES[SollumType.DRAWABLE]),
-               (SollumType.DRAWABLE_DICTIONARY.value,
-                SOLLUMZ_UI_NAMES[SollumType.DRAWABLE_DICTIONARY], SOLLUMZ_UI_NAMES[SollumType.DRAWABLE_DICTIONARY]),
-               (SollumType.BOUND_COMPOSITE.value, SOLLUMZ_UI_NAMES[SollumType.BOUND_COMPOSITE], SOLLUMZ_UI_NAMES[SollumType.BOUND_COMPOSITE])],
-        name="Hierarchy Type",
-        default=SollumType.DRAWABLE,
-        options={"HIDDEN"}
-    )
-
     bpy.types.Scene.all_sollum_type = bpy.props.EnumProperty(
         items=sorted(items_from_enums(SollumType), key=lambda i: i[0]),
         name="Sollum Types",
         options={"HIDDEN"}
     )
-
-    bpy.types.Scene.debug_lights_only_selected = bpy.props.BoolProperty(
-        name="Limit to Selected", description="Only set intensity of the selected lights. (All instances will be affected)")
 
     bpy.types.Scene.sollumz_export_path = bpy.props.StringProperty(
         name="Export Path",
@@ -574,9 +600,13 @@ def register():
 def unregister():
     del bpy.types.Object.sollum_type
     del bpy.types.Material.sollum_type
+    del bpy.types.ShaderNode.is_sollumz
     del bpy.types.Object.entity_properties
-    del bpy.types.Scene.vert_paint_alpha
-    del bpy.types.Scene.debug_sollum_type
+    del bpy.types.Scene.vert_paint_color1
+    del bpy.types.Scene.vert_paint_color2
+    del bpy.types.Scene.vert_paint_color3
+    del bpy.types.Scene.vert_paint_color4
+    del bpy.types.Scene.vert_paint_color5
+    del bpy.types.Scene.vert_paint_color6
     del bpy.types.Scene.all_sollum_type
-    del bpy.types.Scene.debug_lights_only_selected
     del bpy.types.Scene.sollumz_export_path

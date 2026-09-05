@@ -1,19 +1,21 @@
-import os
-import traceback
 import bpy
 from bpy.props import (
     IntProperty,
+    BoolProperty,
+    StringProperty,
+    PointerProperty,
 )
-from bpy_extras.io_utils import ImportHelper
 from ...sollumz_helper import SOLLUMZ_OT_base, has_embedded_textures, has_collision
 from ...sollumz_properties import SOLLUMZ_UI_NAMES, ArchetypeType, AssetType, SollumType
-from ...sollumz_operators import SelectTimeFlagsRangeMultiSelect, ClearTimeFlagsMultiSelect
-from ...sollumz_preferences import get_export_settings
+from ...sollumz_operators import SelectTimeFlagsRangeMultiSelect, ClearTimeFlagsMultiSelect, ImportAssetsOperatorImpl, ExportAssetsOperatorImpl
 from ...ydr.cloth_env import cloth_env_find_mesh_objects
 from ..utils import get_selected_ytyp, get_selected_archetype
-from ..ytypimport import import_ytyp
-from ..ytypexport import selected_ytyp_to_xml
-from ...shared.multiselection import MultiSelectOneOperator, MultiSelectAllOperator
+from ...shared.multiselection import (
+    MultiSelectOneOperator,
+    MultiSelectAllOperator,
+    MultiSelectInvertOperator,
+)
+from ... import logger
 
 
 class SOLLUMZ_OT_create_ytyp(SOLLUMZ_OT_base, bpy.types.Operator):
@@ -65,66 +67,73 @@ class SOLLUMZ_OT_create_archetype(SOLLUMZ_OT_base, bpy.types.Operator):
         return True
 
 
-class SOLLUMZ_OT_ytyp_select_archetype(MultiSelectOneOperator, bpy.types.Operator):
+class ArchetypesSelectMixin:
+    ytyp_index: IntProperty(name="YTYP Index", min=-1, default=-1)
+
+    def get_collection(self, context):
+        return (
+            get_selected_ytyp(context)
+            if self.ytyp_index == -1
+            else context.scene.ytyps[self.ytyp_index]
+        ).archetypes
+
+
+class SOLLUMZ_OT_ytyp_select_archetype(ArchetypesSelectMixin, MultiSelectOneOperator, bpy.types.Operator):
     bl_idname = "sollumz.ytyp_select_archetype"
     bl_label = "Select Archetype"
 
-    ytyp_index: IntProperty(name="YTYP Index", min=-1, default=-1)
 
-    def get_collection(self, context):
-        return (
-            get_selected_ytyp(context)
-            if self.ytyp_index == -1
-            else context.scene.ytyps[self.ytyp_index]
-        ).archetypes
-
-
-class SOLLUMZ_OT_ytyp_select_all_archetypes(MultiSelectAllOperator, bpy.types.Operator):
+class SOLLUMZ_OT_ytyp_select_all_archetypes(ArchetypesSelectMixin, MultiSelectAllOperator, bpy.types.Operator):
     bl_idname = "sollumz.ytyp_select_all_archetypes"
     bl_label = "Select All Archetypes"
 
+
+class SOLLUMZ_OT_ytyp_select_invert_archetypes(ArchetypesSelectMixin, MultiSelectInvertOperator, bpy.types.Operator):
+    bl_idname = "sollumz.ytyp_select_invert_archetypes"
+    bl_label = "Invert Selected Archetypes"
+
+
+class MloEntitiesSelectMixin:
     ytyp_index: IntProperty(name="YTYP Index", min=-1, default=-1)
+    archetype_index: IntProperty(name="Archetype Index", min=-1, default=-1)
 
     def get_collection(self, context):
         return (
-            get_selected_ytyp(context)
-            if self.ytyp_index == -1
-            else context.scene.ytyps[self.ytyp_index]
-        ).archetypes
+            get_selected_archetype(context)
+            if self.archetype_index == -1
+            else (
+                get_selected_ytyp(context)
+                if self.ytyp_index == -1
+                else context.scene.ytyps[self.ytyp_index]
+            ).archetypes[self.archetype_index]
+        ).entities
+
+    def _filter_items_impl(self, context) -> tuple[list[int], list[int]]:
+        from ..ui.entities import entities_filter_items
+        return entities_filter_items(
+            self.get_collection(context),
+            self.filter_name,
+            self.use_filter_sort_reverse,
+            self.use_filter_sort_alpha
+        )
 
 
-class SOLLUMZ_OT_archetype_select_mlo_entity(MultiSelectOneOperator, bpy.types.Operator):
+class SOLLUMZ_OT_archetype_select_mlo_entity(MloEntitiesSelectMixin, MultiSelectOneOperator, bpy.types.Operator):
     bl_idname = "sollumz.archetype_select_mlo_entity"
     bl_label = "Select Entity"
 
-    ytyp_index: IntProperty(name="YTYP Index", min=-1, default=-1)
-    archetype_index: IntProperty(name="Archetype Index", min=-1, default=-1)
 
-    def get_collection(self, context):
-        return (
-            get_selected_archetype(context)
-            if self.archetype_index == -1
-            else (
-                get_selected_ytyp(context)
-                if self.ytyp_index == -1
-                else context.scene.ytyps[self.ytyp_index]
-            ).archetypes[self.archetype_index]
-        ).entities
-
-    def _filter_items_impl(self, context) -> tuple[list[int], list[int]]:
-        from ..ui.entities import entities_filter_items
-        return entities_filter_items(
-            self.get_collection(context),
-            self.filter_name,
-            self.use_filter_sort_reverse,
-            self.use_filter_sort_alpha
-        )
-
-
-class SOLLUMZ_OT_archetype_select_all_mlo_entity(MultiSelectAllOperator, bpy.types.Operator):
+class SOLLUMZ_OT_archetype_select_all_mlo_entity(MloEntitiesSelectMixin, MultiSelectAllOperator, bpy.types.Operator):
     bl_idname = "sollumz.archetype_select_all_mlo_entity"
     bl_label = "Select All Entities"
 
+
+class SOLLUMZ_OT_archetype_select_invert_mlo_entity(MloEntitiesSelectMixin, MultiSelectInvertOperator, bpy.types.Operator):
+    bl_idname = "sollumz.archetype_select_invert_mlo_entity"
+    bl_label = "Invert Selected Entities"
+
+
+class MloPortalsSelectMixin:
     ytyp_index: IntProperty(name="YTYP Index", min=-1, default=-1)
     archetype_index: IntProperty(name="Archetype Index", min=-1, default=-1)
 
@@ -137,41 +146,25 @@ class SOLLUMZ_OT_archetype_select_all_mlo_entity(MultiSelectAllOperator, bpy.typ
                 if self.ytyp_index == -1
                 else context.scene.ytyps[self.ytyp_index]
             ).archetypes[self.archetype_index]
-        ).entities
-
-    def _filter_items_impl(self, context) -> tuple[list[int], list[int]]:
-        from ..ui.entities import entities_filter_items
-        return entities_filter_items(
-            self.get_collection(context),
-            self.filter_name,
-            self.use_filter_sort_reverse,
-            self.use_filter_sort_alpha
-        )
+        ).portals
 
 
-class SOLLUMZ_OT_archetype_select_mlo_portal(MultiSelectOneOperator, bpy.types.Operator):
+class SOLLUMZ_OT_archetype_select_mlo_portal(MloPortalsSelectMixin, MultiSelectOneOperator, bpy.types.Operator):
     bl_idname = "sollumz.archetype_select_mlo_portal"
     bl_label = "Select Portal"
 
-    ytyp_index: IntProperty(name="YTYP Index", min=-1, default=-1)
-    archetype_index: IntProperty(name="Archetype Index", min=-1, default=-1)
 
-    def get_collection(self, context):
-        return (
-            get_selected_archetype(context)
-            if self.archetype_index == -1
-            else (
-                get_selected_ytyp(context)
-                if self.ytyp_index == -1
-                else context.scene.ytyps[self.ytyp_index]
-            ).archetypes[self.archetype_index]
-        ).portals
-
-
-class SOLLUMZ_OT_archetype_select_all_mlo_portal(MultiSelectAllOperator, bpy.types.Operator):
+class SOLLUMZ_OT_archetype_select_all_mlo_portal(MloPortalsSelectMixin, MultiSelectAllOperator, bpy.types.Operator):
     bl_idname = "sollumz.archetype_select_all_mlo_portal"
     bl_label = "Select All Portals"
 
+
+class SOLLUMZ_OT_archetype_select_invert_mlo_portal(MloPortalsSelectMixin, MultiSelectInvertOperator, bpy.types.Operator):
+    bl_idname = "sollumz.archetype_select_invert_mlo_portal"
+    bl_label = "Invert Selected Portals"
+
+
+class MloRoomsSelectMixin:
     ytyp_index: IntProperty(name="YTYP Index", min=-1, default=-1)
     archetype_index: IntProperty(name="Archetype Index", min=-1, default=-1)
 
@@ -184,32 +177,25 @@ class SOLLUMZ_OT_archetype_select_all_mlo_portal(MultiSelectAllOperator, bpy.typ
                 if self.ytyp_index == -1
                 else context.scene.ytyps[self.ytyp_index]
             ).archetypes[self.archetype_index]
-        ).portals
+        ).rooms
 
 
-class SOLLUMZ_OT_archetype_select_mlo_room(MultiSelectOneOperator, bpy.types.Operator):
+class SOLLUMZ_OT_archetype_select_mlo_room(MloRoomsSelectMixin, MultiSelectOneOperator, bpy.types.Operator):
     bl_idname = "sollumz.archetype_select_mlo_room"
     bl_label = "Select Room"
 
-    ytyp_index: IntProperty(name="YTYP Index", min=-1, default=-1)
-    archetype_index: IntProperty(name="Archetype Index", min=-1, default=-1)
 
-    def get_collection(self, context):
-        return (
-            get_selected_archetype(context)
-            if self.archetype_index == -1
-            else (
-                get_selected_ytyp(context)
-                if self.ytyp_index == -1
-                else context.scene.ytyps[self.ytyp_index]
-            ).archetypes[self.archetype_index]
-        ).rooms
-
-
-class SOLLUMZ_OT_archetype_select_all_mlo_room(MultiSelectAllOperator, bpy.types.Operator):
+class SOLLUMZ_OT_archetype_select_all_mlo_room(MloRoomsSelectMixin, MultiSelectAllOperator, bpy.types.Operator):
     bl_idname = "sollumz.archetype_select_all_mlo_room"
     bl_label = "Select All Rooms"
 
+
+class SOLLUMZ_OT_archetype_select_invert_mlo_room(MloRoomsSelectMixin, MultiSelectInvertOperator, bpy.types.Operator):
+    bl_idname = "sollumz.archetype_select_invert_mlo_room"
+    bl_label = "Invert Selected Rooms"
+
+
+class MloTcmSelectMixin:
     ytyp_index: IntProperty(name="YTYP Index", min=-1, default=-1)
     archetype_index: IntProperty(name="Archetype Index", min=-1, default=-1)
 
@@ -222,32 +208,25 @@ class SOLLUMZ_OT_archetype_select_all_mlo_room(MultiSelectAllOperator, bpy.types
                 if self.ytyp_index == -1
                 else context.scene.ytyps[self.ytyp_index]
             ).archetypes[self.archetype_index]
-        ).rooms
+        ).timecycle_modifiers
 
 
-class SOLLUMZ_OT_archetype_select_mlo_tcm(MultiSelectOneOperator, bpy.types.Operator):
+class SOLLUMZ_OT_archetype_select_mlo_tcm(MloTcmSelectMixin, MultiSelectOneOperator, bpy.types.Operator):
     bl_idname = "sollumz.archetype_select_mlo_tcm"
-    bl_label = "Select Room"
-
-    ytyp_index: IntProperty(name="YTYP Index", min=-1, default=-1)
-    archetype_index: IntProperty(name="Archetype Index", min=-1, default=-1)
-
-    def get_collection(self, context):
-        return (
-            get_selected_archetype(context)
-            if self.archetype_index == -1
-            else (
-                get_selected_ytyp(context)
-                if self.ytyp_index == -1
-                else context.scene.ytyps[self.ytyp_index]
-            ).archetypes[self.archetype_index]
-        ).timecycle_modifiers
+    bl_label = "Select Timecycle Modifiers"
 
 
-class SOLLUMZ_OT_archetype_select_all_mlo_tcm(MultiSelectAllOperator, bpy.types.Operator):
+class SOLLUMZ_OT_archetype_select_all_mlo_tcm(MloTcmSelectMixin, MultiSelectAllOperator, bpy.types.Operator):
     bl_idname = "sollumz.archetype_select_all_mlo_tcm"
-    bl_label = "Select All Rooms"
+    bl_label = "Select All Timecycle Modifiers"
 
+
+class SOLLUMZ_OT_archetype_select_invert_mlo_tcm(MloTcmSelectMixin, MultiSelectInvertOperator, bpy.types.Operator):
+    bl_idname = "sollumz.archetype_select_invert_mlo_tcm"
+    bl_label = "Invert Selected Timecycle Modifiers"
+
+
+class MloEntitySetsSelectMixin:
     ytyp_index: IntProperty(name="YTYP Index", min=-1, default=-1)
     archetype_index: IntProperty(name="Archetype Index", min=-1, default=-1)
 
@@ -260,45 +239,22 @@ class SOLLUMZ_OT_archetype_select_all_mlo_tcm(MultiSelectAllOperator, bpy.types.
                 if self.ytyp_index == -1
                 else context.scene.ytyps[self.ytyp_index]
             ).archetypes[self.archetype_index]
-        ).timecycle_modifiers
+        ).entity_sets
 
 
-class SOLLUMZ_OT_archetype_select_mlo_entity_set(MultiSelectOneOperator, bpy.types.Operator):
+class SOLLUMZ_OT_archetype_select_mlo_entity_set(MloEntitySetsSelectMixin, MultiSelectOneOperator, bpy.types.Operator):
     bl_idname = "sollumz.archetype_select_mlo_entity_set"
     bl_label = "Select Entity Set"
 
-    ytyp_index: IntProperty(name="YTYP Index", min=-1, default=-1)
-    archetype_index: IntProperty(name="Archetype Index", min=-1, default=-1)
 
-    def get_collection(self, context):
-        return (
-            get_selected_archetype(context)
-            if self.archetype_index == -1
-            else (
-                get_selected_ytyp(context)
-                if self.ytyp_index == -1
-                else context.scene.ytyps[self.ytyp_index]
-            ).archetypes[self.archetype_index]
-        ).entity_sets
-
-
-class SOLLUMZ_OT_archetype_select_all_mlo_entity_set(MultiSelectAllOperator, bpy.types.Operator):
+class SOLLUMZ_OT_archetype_select_all_mlo_entity_set(MloEntitySetsSelectMixin, MultiSelectAllOperator, bpy.types.Operator):
     bl_idname = "sollumz.archetype_select_all_mlo_entity_set"
     bl_label = "Select All Entity Sets"
 
-    ytyp_index: IntProperty(name="YTYP Index", min=-1, default=-1)
-    archetype_index: IntProperty(name="Archetype Index", min=-1, default=-1)
 
-    def get_collection(self, context):
-        return (
-            get_selected_archetype(context)
-            if self.archetype_index == -1
-            else (
-                get_selected_ytyp(context)
-                if self.ytyp_index == -1
-                else context.scene.ytyps[self.ytyp_index]
-            ).archetypes[self.archetype_index]
-        ).entity_sets
+class SOLLUMZ_OT_archetype_select_invert_mlo_entity_set(MloEntitySetsSelectMixin, MultiSelectInvertOperator, bpy.types.Operator):
+    bl_idname = "sollumz.archetype_select_invert_mlo_entity_set"
+    bl_label = "Invert Selected Entity Sets"
 
 
 class SOLLUMZ_OT_create_archetype_from_selected(SOLLUMZ_OT_base, bpy.types.Operator):
@@ -306,42 +262,36 @@ class SOLLUMZ_OT_create_archetype_from_selected(SOLLUMZ_OT_base, bpy.types.Opera
     bl_idname = "sollumz.createarchetypefromselected"
     bl_label = "Auto-Create From Selected"
 
-    allowed_types = [SollumType.DRAWABLE,
-                     SollumType.BOUND_COMPOSITE, SollumType.FRAGMENT, SollumType.DRAWABLE_DICTIONARY]
 
     @classmethod
     def poll(cls, context):
         return get_selected_ytyp(context) is not None
 
     def run(self, context):
-        selected_objs = context.selected_objects
+        selected_ytyp = get_selected_ytyp(context)
+        selected_objs = {root for o in context.selected_objects if (root := self._find_root(o))}
         found = False
         for obj in selected_objs:
             archetype_type = context.scene.create_archetype_type
-            if not obj.sollum_type in self.allowed_types:
-                continue
             if archetype_type == ArchetypeType.MLO:
                 if obj.sollum_type != SollumType.BOUND_COMPOSITE:
-                    self.message(
-                        f"MLO asset '{obj.name}' must be a {SOLLUMZ_UI_NAMES[SollumType.BOUND_COMPOSITE]}!")
+                    self.message(f"MLO asset '{obj.name}' must be a {SOLLUMZ_UI_NAMES[SollumType.BOUND_COMPOSITE]}!")
                     continue
             found = True
-            selected_ytyp = get_selected_ytyp(context)
             item = selected_ytyp.new_archetype(archetype_type)
             item.name = obj.name
             item.asset = obj
             item.texture_dictionary = obj.name if has_embedded_textures(obj) else ""
             drawable_dictionary = ""
-            if obj.parent:
-                if obj.parent.sollum_type == SollumType.DRAWABLE_DICTIONARY:
-                    drawable_dictionary = obj.parent.name
+            if obj.parent and obj.parent.sollum_type == SollumType.DRAWABLE_DICTIONARY:
+                drawable_dictionary = obj.parent.name
             item.drawable_dictionary = drawable_dictionary
             item.physics_dictionary = obj.name if has_collision(obj) and obj.sollum_type != SollumType.FRAGMENT else ""
 
-            if obj.sollum_type == SollumType.DRAWABLE:
-                item.asset_type = AssetType.DRAWABLE
-            elif obj.sollum_type == SollumType.DRAWABLE_DICTIONARY:
+            if drawable_dictionary:
                 item.asset_type = AssetType.DRAWABLE_DICTIONARY
+            elif obj.sollum_type == SollumType.DRAWABLE:
+                item.asset_type = AssetType.DRAWABLE
             elif obj.sollum_type == SollumType.BOUND_COMPOSITE:
                 item.asset_type = AssetType.ASSETLESS
             elif obj.sollum_type == SollumType.FRAGMENT:
@@ -351,10 +301,35 @@ class SOLLUMZ_OT_create_archetype_from_selected(SOLLUMZ_OT_base, bpy.types.Opera
                     item.flags.flag26 = True  # set 'Has Cloth' flag
 
         if not found:
+            allowed_types = (SollumType.DRAWABLE, SollumType.BOUND_COMPOSITE, SollumType.FRAGMENT)
+            allowed_types_str = ",".join([SOLLUMZ_UI_NAMES[type] for type in allowed_types])
             self.message(
-                f"No asset of type '{','.join([SOLLUMZ_UI_NAMES[type] for type in self.allowed_types])}' found!")
+                f"No asset of type '{allowed_types_str}' found!"
+            )
             return False
         return True
+
+    def _find_root(self, obj: bpy.types.Object) -> bpy.types.Object | None:
+        # find_sollumz_parent doesn't work here, the behaviour we want is a bit different:
+        # - If we find a FRAGMENT, return it
+        # - If we find a DRAWABLE, return it unless its parent is a FRAGMENT (even with DRAWABLE_DICTIONARY we want to
+        #   return the DRAWABLE)
+        # - If we find a BOUND_COMPOSITE, return it unless it's parented
+        # - Anything else, go up its parent
+        while obj:
+            parent_obj = obj.parent
+            obj_type = obj.sollum_type
+            match obj_type:
+                case SollumType.FRAGMENT:
+                    return obj
+                case SollumType.DRAWABLE if not parent_obj or parent_obj.sollum_type != SollumType.FRAGMENT:
+                    return obj
+                case SollumType.BOUND_COMPOSITE if not parent_obj:
+                    return obj
+
+            obj = parent_obj
+
+        return None
 
 
 class SOLLUMZ_OT_delete_archetype(SOLLUMZ_OT_base, bpy.types.Operator):
@@ -370,12 +345,7 @@ class SOLLUMZ_OT_delete_archetype(SOLLUMZ_OT_base, bpy.types.Operator):
     def run(self, context):
         selected_ytyp = get_selected_ytyp(context)
 
-        indices_to_remove = selected_ytyp.archetypes.selected_items_indices
-        indices_to_remove.sort(reverse=True)
-        new_active_index = max(indices_to_remove[-1] - 1, 0) if indices_to_remove else 0
-        for index_to_remove in indices_to_remove:
-            selected_ytyp.archetypes.remove(index_to_remove)
-        selected_ytyp.archetypes.select(new_active_index)
+        selected_ytyp.archetypes.remove_selected()
 
         # Force redraw of gizmos
         context.space_data.show_gizmo = context.space_data.show_gizmo
@@ -412,12 +382,7 @@ class SOLLUMZ_OT_delete_timecycle_modifier(SOLLUMZ_OT_base, bpy.types.Operator):
     def run(self, context):
         selected_archetype = get_selected_archetype(context)
 
-        indices_to_remove = selected_archetype.timecycle_modifiers.selected_items_indices
-        indices_to_remove.sort(reverse=True)
-        new_active_index = max(indices_to_remove[-1] - 1, 0) if indices_to_remove else 0
-        for index_to_remove in indices_to_remove:
-            selected_archetype.timecycle_modifiers.remove(index_to_remove)
-        selected_archetype.timecycle_modifiers.select(new_active_index)
+        selected_archetype.timecycle_modifiers.remove_selected()
 
         return True
 
@@ -444,75 +409,25 @@ class SOLLUMZ_OT_YTYP_TIME_FLAGS_clear(ClearTimeFlagsMultiSelect, bpy.types.Oper
         yield from (arch.time_flags for arch in get_selected_ytyp(context).archetypes.iter_selected_items())
 
 
-class SOLLUMZ_OT_import_ytyp(SOLLUMZ_OT_base, bpy.types.Operator, ImportHelper):
-    """Import a ytyp.xml"""
-    bl_idname = "sollumz.importytyp"
-    bl_label = "Import ytyp.xml"
-    bl_action = "Import a YTYP"
-
-    filename_ext = ".ytyp.xml"
+class SOLLUMZ_OT_import_ytyp_io(ImportAssetsOperatorImpl, bpy.types.Operator):
+    """Import YTYPs"""
+    bl_idname = "sollumz.import_ytyp_io"
+    bl_label = "Import YTYP"
+    bl_options = {"UNDO"}
 
     filter_glob: bpy.props.StringProperty(
-        default="*.ytyp.xml",
-        options={"HIDDEN"},
+        default="*.ytyp;*.ytyp.xml",
+        options={"HIDDEN", "SKIP_SAVE"},
         maxlen=255,
     )
 
-    def draw(self, context):
-        pass
 
-    def run(self, context):
-        try:
-            import_ytyp(self.filepath)
-            self.message(f"Successfully imported: {self.filepath}")
-            return True
-        except:
-            self.error(f"Error during import: {traceback.format_exc()}")
-            return False
-
-
-class SOLLUMZ_OT_export_ytyp(SOLLUMZ_OT_base, bpy.types.Operator):
+class SOLLUMZ_OT_export_ytyp_io(ExportAssetsOperatorImpl, bpy.types.Operator):
     """Export the selected YTYP"""
-    bl_idname = "sollumz.exportytyp"
-    bl_label = "Export ytyp.xml"
-    bl_action = "Export a YTYP"
-
-    filter_glob: bpy.props.StringProperty(
-        default="*.ytyp.xml",
-        options={"HIDDEN"},
-        maxlen=255,
-    )
-
-    directory: bpy.props.StringProperty(
-        name="Output directory",
-        description="Select export output directory",
-        subtype="DIR_PATH",
-    )
-
-    def draw(self, context):
-        pass
-
-    def invoke(self, context, event):
-        context.window_manager.fileselect_add(self)
-        return {"RUNNING_MODAL"}
+    bl_idname = "sollumz.export_ytyp_io"
+    bl_label = "Export YTYP"
+    sz_export_types = {"YTYP"}
 
     @classmethod
     def poll(cls, context):
-        num_ytyps = len(context.scene.ytyps)
-        return num_ytyps > 0 and context.scene.ytyp_index < num_ytyps
-
-    def get_filepath(self, name):
-        return os.path.join(self.directory, name + ".ytyp.xml")
-
-    def run(self, context):
-        try:
-            export_settings = get_export_settings(context)
-
-            ytyp = selected_ytyp_to_xml(export_settings.apply_transforms)
-            filepath = self.get_filepath(ytyp.name)
-            ytyp.write_xml(filepath)
-            self.message(f"Successfully exported: {filepath}")
-            return True
-        except:
-            self.error(f"Error during export: {traceback.format_exc()}")
-            return False
+        return context.scene.ytyps

@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING
 from ..sollumz_properties import SOLLUMZ_UI_NAMES, SollumType
 from bpy.app.handlers import persistent
 from .collision_materials import collisionmats
-from ..cwxml.flag_preset import FlagPresetsFile
 from ..tools.meshhelper import create_disc, create_cylinder, create_sphere, create_capsule, create_box
 from ..tools.blenderhelper import tag_redraw
+from ..sollumz_preferences import get_addon_preferences
 from mathutils import Vector, Matrix
 import os
 
@@ -28,7 +28,11 @@ class CollisionMatFlags(bpy.types.PropertyGroup):
     no_decal: bpy.props.BoolProperty(name="NO DECAL", default=False)
     no_navmesh: bpy.props.BoolProperty(name="NO NAVMESH", default=False)
     no_ragdoll: bpy.props.BoolProperty(name="NO RAGDOLL", default=False)
-    vehicle_wheel: bpy.props.BoolProperty(name="VEHICLE WHEEL", default=False)
+    vehicle_wheel: bpy.props.BoolProperty(
+        name="VEHICLE WHEEL",
+        description="Runtime-only flag, cleared on export. The game sets it itself during shape tests and asserts "
+                    "that it is not present in resources",
+        default=False)
     no_ptfx: bpy.props.BoolProperty(name="NO PTFX", default=False)
     too_steep_for_player: bpy.props.BoolProperty(name="TOO STEEP FOR PLAYER", default=False)
     no_network_spawn: bpy.props.BoolProperty(name="NO NETWORK SPAWN", default=False)
@@ -81,15 +85,115 @@ def get_collision_mat_raw_flags(f: CollisionMatFlags) -> tuple[int, int]:
     # fmt: on
     return flags_lo, flags_hi
 
+
+MAX_NUM_PROCEDURAL_IDS = 255
+
+
+def ProceduralIdEnumItems(_self=None, context=None, *, full=False) -> tuple[tuple, ...]:
+    try:
+        return ProceduralIdEnumItems._full if full else ProceduralIdEnumItems._formatted
+    except AttributeError:
+        def _load_json(path: str) -> list:
+            import json
+            with open(path, "rb") as f:
+                contents = json.load(f)
+
+            contents = [str(procid) for procid in contents]
+            if len(contents) >= MAX_NUM_PROCEDURAL_IDS:
+                # Trim any additional entries
+                contents = contents[:MAX_NUM_PROCEDURAL_IDS]
+            elif len(contents) < MAX_NUM_PROCEDURAL_IDS:
+                # Fill any missing entries with null
+                contents += ["null"] * (MAX_NUM_PROCEDURAL_IDS - len(contents))
+
+            return contents
+
+        prefs = get_addon_preferences(context)
+        procids_path = prefs.custom_procids_path
+        procids = None
+        if procids_path and os.path.isfile(procids_path):
+            try:
+                procids = _load_json(procids_path)
+            except Exception:
+                procids = None
+
+        if not procids:
+            # No custom procedural IDs, load the default JSON
+            default_procids_path = os.path.join(os.path.dirname(__file__), "procids.json")
+            procids = _load_json(default_procids_path)
+
+        if procids:
+            procids_full = [
+                (f"PROCID_{idx}", name, name, idx)
+                for idx, name in enumerate(procids)
+            ]
+            procids_formatted = [
+                (f"PROCID_{idx}", f"{idx} | {name}", name, idx)
+                for idx, name in enumerate(procids) if name != "null"
+            ]
+            separators_to_insert = []
+            separators_step = 24
+            for i in range(0, len(procids_formatted)-1, separators_step):
+                from_idx = procids_formatted[i][3]
+                to_idx = procids_formatted[min(i+separators_step-1, len(procids_formatted)-2)][3]
+                separators_to_insert.append((i, ("", f"{from_idx}-{to_idx}", "", -1)))
+
+            for idx, separator in reversed(separators_to_insert):
+                procids_formatted.insert(idx, separator)
+
+            # All null entries will fallback to the null entry at 0
+            procids_formatted += [None, ("PROCID_0", "null", "null", 0)]
+
+            ProceduralIdEnumItems._full = tuple(procids_full)
+            ProceduralIdEnumItems._formatted = tuple(procids_formatted)
+        else:
+            ProceduralIdEnumItems._full = []
+            ProceduralIdEnumItems._formatted = []
+        return ProceduralIdEnumItems._full if full else ProceduralIdEnumItems._formatted
+
+
+def ProceduralIdEnumItems_reload():
+    try:
+        # Will reload next time ProceduralIdEnumItems is called
+        del ProceduralIdEnumItems._formatted
+        del ProceduralIdEnumItems._full
+    except AttributeError:
+        pass
+
+
+def ProceduralIdEnumItems_is_mapped(idx: int) -> bool:
+    items = ProceduralIdEnumItems(full=True)
+    return 0 <= idx < MAX_NUM_PROCEDURAL_IDS and items[idx][1] != "null"
+
+
+ProceduralIdEnumItems.reload = ProceduralIdEnumItems_reload
+ProceduralIdEnumItems.is_mapped = ProceduralIdEnumItems_is_mapped
+del ProceduralIdEnumItems_reload
+del ProceduralIdEnumItems_is_mapped
+
 _collision_material_room_items_refs = {}
-_collision_material_mlo_archetype_cache = {} # [material name] -> (ytyp index, archetype index)
+_collision_material_mlo_archetype_cache = {}  # [material name] -> (ytyp index, archetype index)
+
 
 class CollisionProperties(CollisionMatFlags, bpy.types.PropertyGroup):
     collision_index: bpy.props.IntProperty(name="Collision Index", default=0)
-    procedural_id: bpy.props.IntProperty(name="Procedural ID", default=0)
-    room_id: bpy.props.IntProperty(name="Room ID", default=0, min=0)
-    ped_density: bpy.props.IntProperty(name="Ped Density", default=0)
+    procedural_id: bpy.props.IntProperty(name="Procedural ID", default=0, min=0, max=MAX_NUM_PROCEDURAL_IDS-1)
+    room_id: bpy.props.IntProperty(name="Room ID", default=0, min=0, max=31)
+    ped_density: bpy.props.IntProperty(name="Ped Density", default=0, min=0, max=7)
     material_color_index: bpy.props.IntProperty(name="Material Color Index", default=0)
+
+    def _get_procedural_id(self) -> int:
+        value = self.procedural_id
+        return value if ProceduralIdEnumItems.is_mapped(value) else 0
+
+    def _set_procedural_id(self, value: int):
+        self.procedural_id = value if 0 <= value < MAX_NUM_PROCEDURAL_IDS else 0
+
+    procedural_id_enum: bpy.props.EnumProperty(
+        items=ProceduralIdEnumItems,
+        name="Procedural ID",
+        get=_get_procedural_id, set=_set_procedural_id
+    )
 
     def check_room_id_enum_available(self, context) -> bool:
         """Call this before using the `room_id_enum` property."""
@@ -128,7 +232,8 @@ class CollisionProperties(CollisionMatFlags, bpy.types.PropertyGroup):
         from ..ytyp.properties.mlo import get_room_items_for_archetype
         items = get_room_items_for_archetype(mlo)
         items = [(name, f"{idx - 1} | {label}", desc, idx - 1) for idx, (name, label, desc, value) in enumerate(items) if idx > 0]
-        _collision_material_room_items_refs[mlo.uuid] = items  # need to keep a reference to the array on Python side while Blender uses it
+        # need to keep a reference to the array on Python side while Blender uses it
+        _collision_material_room_items_refs[mlo.uuid] = items
         return items
 
     def _get_room(self) -> int:
@@ -149,6 +254,7 @@ class BoundFlags(bpy.types.PropertyGroup):
     map_vehicle: bpy.props.BoolProperty(name="MAP VEHICLE", default=False)
     vehicle_not_bvh: bpy.props.BoolProperty(name="VEHICLE NOT BVH", default=False)
     vehicle_bvh: bpy.props.BoolProperty(name="VEHICLE BVH", default=False)
+    vehicle_box: bpy.props.BoolProperty(name="VEHICLE BOX", default=False)
     ped: bpy.props.BoolProperty(name="PED", default=False)
     ragdoll: bpy.props.BoolProperty(name="RAGDOLL", default=False)
     animal: bpy.props.BoolProperty(name="ANIMAL", default=False)
@@ -181,10 +287,10 @@ class BoundShapeProps(bpy.types.PropertyGroup):
     """
 
     def box_extents_getter(self) -> Vector:
-        from .ybnexport import get_bound_extents
+        from .ybnexport import calc_bound_extents
 
         obj = self.id_data
-        bbmin, bbmax = get_bound_extents(obj)
+        bbmin, bbmax = calc_bound_extents(obj)
         return bbmax - bbmin
 
     def box_extents_setter(self, value: Vector):
@@ -203,11 +309,11 @@ class BoundShapeProps(bpy.types.PropertyGroup):
     )
 
     def sphere_radius_getter(self) -> float:
-        from .ybnexport import get_bound_extents
+        from .ybnexport import calc_bound_extents
         from ..tools.meshhelper import get_inner_sphere_radius
 
         obj = self.id_data
-        bbmin, bbmax = get_bound_extents(obj)
+        bbmin, bbmax = calc_bound_extents(obj)
         radius = get_inner_sphere_radius(bbmin, bbmax)
         return radius
 
@@ -234,19 +340,19 @@ class BoundShapeProps(bpy.types.PropertyGroup):
                 return "Y"
 
     def capsule_radius_getter(self) -> float:
-        from .ybnexport import get_bound_extents
+        from .ybnexport import calc_bound_extents
 
         obj = self.id_data
-        bbmin, bbmax = get_bound_extents(obj)
+        bbmin, bbmax = calc_bound_extents(obj)
         extents = bbmax - bbmin
         radius = extents.x * 0.5
         return radius
 
     def capsule_length_getter(self) -> float:
-        from .ybnexport import get_bound_extents
+        from .ybnexport import calc_bound_extents
 
         obj = self.id_data
-        bbmin, bbmax = get_bound_extents(obj)
+        bbmin, bbmax = calc_bound_extents(obj)
         extents = bbmax - bbmin
         radius = extents.x * 0.5
         length = extents.z if self.capsule_axis() == "Z" else extents.y
@@ -292,20 +398,20 @@ class BoundShapeProps(bpy.types.PropertyGroup):
                 return "Y"
 
     def cylinder_radius_getter(self) -> float:
-        from .ybnexport import get_bound_extents
+        from .ybnexport import calc_bound_extents
 
         obj = self.id_data
-        bbmin, bbmax = get_bound_extents(obj)
+        bbmin, bbmax = calc_bound_extents(obj)
         extents = bbmax - bbmin
         diameter = extents.x if self.cylinder_axis() != "X" else extents.y
         radius = diameter * 0.5
         return radius
 
     def cylinder_length_getter(self) -> float:
-        from .ybnexport import get_bound_extents
+        from .ybnexport import calc_bound_extents
 
         obj = self.id_data
-        bbmin, bbmax = get_bound_extents(obj)
+        bbmin, bbmax = calc_bound_extents(obj)
         extents = bbmax - bbmin
         match self.cylinder_axis():
             case "X":
@@ -347,12 +453,10 @@ class BoundShapeProps(bpy.types.PropertyGroup):
 
 class CollisionMaterial(bpy.types.PropertyGroup):
     def _get_favorite(self):
-        from ..sollumz_preferences import get_addon_preferences
         preferences = get_addon_preferences(bpy.context)
         return preferences.is_favorite_collision_material(self.name)
 
     def _set_favorite(self, value):
-        from ..sollumz_preferences import get_addon_preferences
         preferences = get_addon_preferences(bpy.context)
         preferences.toggle_favorite_collision_material(self.name, value)
 
@@ -366,43 +470,6 @@ class CollisionMaterial(bpy.types.PropertyGroup):
     )
 
 
-class FlagPresetProp(bpy.types.PropertyGroup):
-    index: bpy.props.IntProperty("Index")
-    name: bpy.props.StringProperty("Name")
-
-
-def get_flag_presets_path() -> str:
-    from ..sollumz_preferences import get_config_directory_path
-    return os.path.join(get_config_directory_path(), "flag_presets.xml")
-
-
-_default_flag_presets_path = os.path.join(os.path.dirname(__file__), "flag_presets.xml")
-
-
-def get_default_flag_presets_path() -> str:
-    return _default_flag_presets_path
-
-
-flag_presets = FlagPresetsFile()
-
-
-def load_flag_presets():
-    bpy.context.window_manager.sz_flag_presets.clear()
-
-    path = get_flag_presets_path()
-    if not os.path.exists(path):
-        path = get_default_flag_presets_path()
-        if not os.path.exists(path):
-            return
-
-    file = FlagPresetsFile.from_xml_file(path)
-    flag_presets.presets = file.presets
-    for index, preset in enumerate(flag_presets.presets):
-        item = bpy.context.window_manager.sz_flag_presets.add()
-        item.name = str(preset.name)
-        item.index = index
-
-
 def load_collision_materials():
     bpy.context.window_manager.sz_collision_materials.clear()
     for index, mat in enumerate(collisionmats):
@@ -414,7 +481,12 @@ def load_collision_materials():
 
 def refresh_ui_collections():
     load_collision_materials()
-    load_flag_presets()
+
+
+def _flag_preset_name_search(self, context, edit_text):
+    from ..shared.presets import store
+    from .gta5.presets.flag import FLAG_PRESET_CATEGORY
+    return [p.get("name", "") for p in store.load_presets(FLAG_PRESET_CATEGORY) if p.get("name")]
 
 
 @persistent
@@ -431,8 +503,12 @@ def register():
     bpy.types.WindowManager.sz_collision_materials = bpy.props.CollectionProperty(
         type=CollisionMaterial, name="Collision Materials")
 
-    bpy.types.WindowManager.sz_flag_preset_index = bpy.props.IntProperty(name="Flag Preset Index")
-    bpy.types.WindowManager.sz_flag_presets = bpy.props.CollectionProperty(type=FlagPresetProp, name="Flag Presets")
+    bpy.types.Scene.sz_default_flag_preset_name = bpy.props.StringProperty(
+        name="Default Flag Preset",
+        description="Flag preset applied to new bounds and to bounds auto-created during drawable conversion",
+        default="General (Default)",
+        search=_flag_preset_name_search,
+    )
 
     bpy.types.Material.collision_properties = bpy.props.PointerProperty(
         type=CollisionProperties)
@@ -524,8 +600,7 @@ def unregister():
     del bpy.types.WindowManager.sz_collision_materials
     del bpy.types.Material.collision_properties
     del bpy.types.Material.collision_flags
-    del bpy.types.WindowManager.sz_flag_presets
-    del bpy.types.WindowManager.sz_flag_preset_index
+    del bpy.types.Scene.sz_default_flag_preset_name
     del bpy.types.Scene.create_poly_bound_type
     del bpy.types.Scene.create_seperate_composites
     del bpy.types.Scene.create_bound_type

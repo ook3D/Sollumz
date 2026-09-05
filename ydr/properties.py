@@ -2,6 +2,7 @@ import bpy
 from bpy.types import (
     Object,
     Scene,
+    Material,
 )
 from bpy.props import (
     BoolProperty,
@@ -10,17 +11,17 @@ from bpy.props import (
     FloatVectorProperty,
     CollectionProperty,
     PointerProperty,
+    EnumProperty,
 )
 import os
+import math
 from typing import Optional
 from ..tools.blenderhelper import lod_level_enum_flag_prop_factory
 from ..sollumz_helper import find_sollumz_parent
-from ..cwxml.light_preset import LightPresetsFile
-from ..cwxml.shader_preset import ShaderPresetsFile
 from ..sollumz_properties import SOLLUMZ_UI_NAMES, items_from_enums, LODLevel, SollumType, LightType, FlagPropertyGroup, TimeFlagsMixin
 from ..ydr.shader_materials import shadermats, shadermats_by_filename
 from .render_bucket import RenderBucket, RenderBucketEnumItems
-from .light_flashiness import Flashiness, LightFlashinessEnumItems
+from .light_flashiness import LightFlashiness, LightFlashinessEnumItems
 from bpy.app.handlers import persistent
 from bpy.path import basename
 
@@ -28,8 +29,10 @@ from bpy.path import basename
 class ShaderOrderItem(bpy.types.PropertyGroup):
     # For drawable shader order list
     index: bpy.props.IntProperty(min=0)
+    material: bpy.props.PointerProperty(type=Material)
     name: bpy.props.StringProperty()
-    filename: bpy.props.StringProperty()
+    shader: bpy.props.StringProperty()
+    user_models: bpy.props.StringProperty() # models using this shader, to display in UI
 
 
 class DrawableShaderOrder(bpy.types.PropertyGroup):
@@ -145,6 +148,8 @@ class SkinnedDrawableModelProperties(bpy.types.PropertyGroup):
             return self.low
         elif lod_level == LODLevel.VERYLOW:
             return self.very_low
+        else:
+            assert False, f"Unknown LOD level '{lod_level}'"
 
 
 class ShaderProperties(bpy.types.PropertyGroup):
@@ -170,6 +175,21 @@ class TextureProperties(bpy.types.PropertyGroup):
 
 class BoneFlag(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(default="")
+
+
+BoneFlagEnumItems = (
+    ("RotX", "RotX", "", 0x1),
+    ("RotY", "RotY", "", 0x2),
+    ("RotZ", "RotZ", "", 0x4),
+
+    ("TransX", "TransX", "", 0x10),
+    ("TransY", "TransY", "", 0x20),
+    ("TransZ", "TransZ", "", 0x40),
+
+    ("ScaleX", "ScaleX", "", 0x100),
+    ("ScaleY", "ScaleY", "", 0x200),
+    ("ScaleZ", "ScaleZ", "", 0x400),
+)
 
 
 class BoneProperties(bpy.types.PropertyGroup):
@@ -222,15 +242,43 @@ class BoneProperties(bpy.types.PropertyGroup):
         self.manual_tag = value
         self.use_manual_tag = value != self.calc_tag()
 
-    tag: bpy.props.IntProperty(
+    def get_flags_enum(self):
+        flag_set = set(f.name for f in self.flags)
+        flag_int = 0
+        for name, _, _, value in BoneFlagEnumItems:
+            if name in flag_set:
+                flag_int |= value
+
+        return flag_int
+
+    def set_flags_enum(self, flag_int: int):
+        flags = []
+        for name, _, _, value in BoneFlagEnumItems:
+            if (flag_int & value) != 0:
+                flags.append(name)
+
+        self.flags.clear()
+        for flag_name in flags:
+            new_flag = self.flags.add()
+            new_flag.name = flag_name
+
+    tag: IntProperty(
         name="Tag", description="Unique value that identifies this bone in the armature",
-        get=get_tag, set=set_tag, default=0, min=0, max=0xFFFF)
-    manual_tag: bpy.props.IntProperty(name="Manual Tag", default=0, min=0, max=0xFFFF)
-    use_manual_tag: bpy.props.BoolProperty(
+        get=get_tag, set=set_tag, default=0, min=0, max=0xFFFF
+    )
+    manual_tag: IntProperty(name="Manual Tag", default=0, min=0, max=0xFFFF)
+    use_manual_tag: BoolProperty(
         name="Use Manual Tag", description="Specify a tag instead of auto-calculating it",
         default=False)
-    flags: bpy.props.CollectionProperty(type=BoneFlag)
-    ul_index: bpy.props.IntProperty(name="UIListIndex", default=0)
+
+    # Just a wrapper around the flags collection property due to backwards compatibility, but it really doesn't make
+    # sense to have a collection for this
+    flags_enum: EnumProperty(
+        items=BoneFlagEnumItems, name="Flags", options={"ENUM_FLAG"},
+        get=get_flags_enum, set=set_flags_enum
+    )
+    flags: CollectionProperty(type=BoneFlag)
+    ul_index: IntProperty(name="UIListIndex", default=0)
 
 
 class ShaderMaterial(bpy.types.PropertyGroup):
@@ -254,9 +302,13 @@ class ShaderMaterial(bpy.types.PropertyGroup):
     )
 
 
+LIGHT_INTENSITY_SCALE_FACTOR = 500
+
+
 class LightProperties(bpy.types.PropertyGroup):
-    flashiness: bpy.props.EnumProperty(name="Flashiness", items=LightFlashinessEnumItems,
-                                       default=Flashiness.CONSTANT.name)
+    flashiness: bpy.props.EnumProperty(
+        name="Flashiness", items=LightFlashinessEnumItems, default=LightFlashiness.CONSTANT.name
+    )
     group_id: bpy.props.IntProperty(name="Group ID")
     culling_plane_normal: bpy.props.FloatVectorProperty(name="Culling Plane Normal", subtype="XYZ")
     culling_plane_offset: bpy.props.FloatProperty(name="Culling Plane Offset", subtype="DISTANCE")
@@ -289,10 +341,92 @@ class LightProperties(bpy.types.PropertyGroup):
     extent: bpy.props.FloatVectorProperty(name="Extent", default=(1, 1, 1), subtype="XYZ", soft_min=0.01, unit="LENGTH")
     projected_texture_hash: bpy.props.StringProperty(name="Projected Texture Hash")
 
+    # Wrapper properties
+    def _get_intensity(self) -> float:
+        return self.id_data.energy / LIGHT_INTENSITY_SCALE_FACTOR
 
-class PresetEntry(bpy.types.PropertyGroup):
-    index: bpy.props.IntProperty("Index")
-    name: bpy.props.StringProperty("Name")
+    def _set_intensity(self, value: float):
+        self.id_data.energy = value * LIGHT_INTENSITY_SCALE_FACTOR
+
+    intensity: FloatProperty(
+        name="Intensity",
+        get=_get_intensity, set=_set_intensity,
+    )
+
+    def _get_falloff(self) -> float:
+        return self.id_data.cutoff_distance
+
+    def _set_falloff(self, value: float):
+        self.id_data.use_custom_distance = True
+        self.id_data.cutoff_distance = value
+
+    falloff: FloatProperty(
+        name="Falloff",
+        get=_get_falloff, set=_set_falloff,
+        min=0.0,
+    )
+
+    def _get_falloff_exponent(self) -> float:
+        return self.id_data.shadow_soft_size * 5
+
+    def _set_falloff_exponent(self, value: float):
+        self.id_data.shadow_soft_size = value / 5
+
+    falloff_exponent: FloatProperty(
+        name="Falloff Exponent",
+        get=_get_falloff_exponent, set=_set_falloff_exponent,
+        min=0.0,
+    )
+
+    def _get_volume_intensity(self) -> float:
+        return self.id_data.volume_factor
+
+    def _set_volume_intensity(self, value: float):
+        self.id_data.volume_factor = value
+
+    volume_intensity: FloatProperty(
+        name="Volume Intensity",
+        get=_get_volume_intensity, set=_set_volume_intensity,
+        min=0.0,
+    )
+
+    def _get_shadow_near_clip(self) -> float:
+        return self.id_data.shadow_buffer_clip_start
+
+    def _set_shadow_near_clip(self, value: float):
+        self.id_data.shadow_buffer_clip_start = value
+
+    shadow_near_clip: FloatProperty(
+        name="Shadow Near Clip",
+        get=_get_shadow_near_clip, set=_set_shadow_near_clip,
+        min=1e-6,
+    )
+
+    def _get_cone_inner_angle(self) -> float:
+        return abs((self.id_data.spot_blend * math.pi) - math.pi)
+
+    def _set_cone_inner_angle(self, value: float):
+        self.id_data.spot_blend = abs((value / math.pi) - 1)
+
+    cone_inner_angle: FloatProperty(
+        name="Cone Inner Angle",
+        get=_get_cone_inner_angle, set=_set_cone_inner_angle,
+        subtype="ANGLE",
+        min=0.0, max=math.pi / 2,
+    )
+
+    def _get_cone_outer_angle(self) -> float:
+        return self.id_data.spot_size / 2
+
+    def _set_cone_outer_angle(self, value: float):
+        self.id_data.spot_size = value * 2
+
+    cone_outer_angle: FloatProperty(
+        name="Cone Outer Angle",
+        get=_get_cone_outer_angle, set=_set_cone_outer_angle,
+        subtype="ANGLE",
+        min=0.0, max=math.pi / 2,
+    )
 
 
 class LightTimeFlags(TimeFlagsMixin, bpy.types.PropertyGroup):
@@ -482,72 +616,9 @@ def set_light_type(self, value):
         self.is_capsule = False
 
 
-def get_light_presets_path() -> str:
-    from ..sollumz_preferences import get_config_directory_path
-    return os.path.join(get_config_directory_path(), "light_presets.xml")
-
-
-def get_shader_presets_path() -> str:
-    from ..sollumz_preferences import get_config_directory_path
-    return os.path.join(get_config_directory_path(), "shader_presets.xml")
-
-
-_default_light_presets_path = os.path.join(os.path.dirname(__file__), "light_presets.xml")
-
-_default_shader_presets_path = os.path.join(os.path.dirname(__file__), "shader_presets.xml")
-
-
-def get_default_light_presets_path() -> str:
-    return _default_light_presets_path
-
-
-def get_default_shader_presets_path() -> str:
-    return _default_shader_presets_path
-
-
-light_presets = LightPresetsFile()
-
-shader_presets = ShaderPresetsFile()
-
-
-def load_light_presets():
-    bpy.context.window_manager.sz_light_presets.clear()
-
-    path = get_light_presets_path()
-    if not os.path.exists(path):
-        path = get_default_light_presets_path()
-        if not os.path.exists(path):
-            return
-
-    file = LightPresetsFile.from_xml_file(path)
-    light_presets.presets = file.presets
-    for index, preset in enumerate(light_presets.presets):
-        item = bpy.context.window_manager.sz_light_presets.add()
-        item.name = str(preset.name)
-        item.index = index
-
-
-def load_shader_presets():
-    bpy.context.window_manager.sz_shader_presets.clear()
-
-    path = get_shader_presets_path()
-    if not os.path.exists(path):
-        path = get_default_shader_presets_path()
-        if not os.path.exists(path):
-            return
-
-    file = ShaderPresetsFile.from_xml_file(path)
-    shader_presets.presets = file.presets
-    for index, preset in enumerate(shader_presets.presets):
-        item = bpy.context.window_manager.sz_shader_presets.add()
-        item.name = str(preset.name)
-        item.index = index
-
-
 def get_texture_name(self):
-    if self.image:
-        return os.path.splitext(basename(self.image.filepath))[0]
-    return ""
+    from ..ytd.properties import get_texture_name as impl
+    return impl(self.image)
 
 
 def get_model_properties(model_obj: bpy.types.Object, lod_level: LODLevel) -> DrawableModelProperties:
@@ -575,9 +646,6 @@ def refresh_ui_collections():
         item.index = index
         item.name = mat.name
         item.search_name = mat.ui_name.replace(" ", "").replace("_", "")
-
-    load_light_presets()
-    load_shader_presets()
 
 
 @persistent
@@ -630,8 +698,7 @@ def register():
         set=set_light_type
     )
     bpy.types.Light.is_capsule = bpy.props.BoolProperty()
-    bpy.types.Light.light_properties = bpy.props.PointerProperty(
-        type=LightProperties)
+    bpy.types.Light.light_properties = bpy.props.PointerProperty(type=LightProperties)
     bpy.types.Scene.create_light_type = bpy.props.EnumProperty(
         items=[
             (LightType.POINT.value,
@@ -647,18 +714,6 @@ def register():
     )
     bpy.types.Light.time_flags = bpy.props.PointerProperty(type=LightTimeFlags)
     bpy.types.Light.light_flags = bpy.props.PointerProperty(type=LightFlags)
-
-    bpy.types.Scene.sollumz_auto_lod_ref_mesh = bpy.props.PointerProperty(
-        type=bpy.types.Mesh, name="Reference Mesh", description="The mesh to copy and decimate for each LOD level. You'd usually want to set this as the highest LOD then run the tool for all lower LODs")
-    bpy.types.Scene.sollumz_auto_lod_levels = lod_level_enum_flag_prop_factory()
-    bpy.types.Scene.sollumz_auto_lod_decimate_step = bpy.props.FloatProperty(
-        name="Decimate Step", min=0.0, max=0.99, default=0.6)
-
-    bpy.types.WindowManager.sz_light_preset_index = bpy.props.IntProperty(name="Light Preset Index")
-    bpy.types.WindowManager.sz_light_presets = bpy.props.CollectionProperty(type=PresetEntry, name="Light Presets")
-
-    bpy.types.WindowManager.sz_shader_preset_index = bpy.props.IntProperty(name="Shader Preset Index")
-    bpy.types.WindowManager.sz_shader_presets = bpy.props.CollectionProperty(type=PresetEntry, name="Shader Presets")
 
     bpy.types.Scene.sollumz_extract_lods_levels = lod_level_enum_flag_prop_factory()
     bpy.types.Scene.sollumz_extract_lods_parent_type = bpy.props.EnumProperty(name="Parent Type", items=(
@@ -797,16 +852,9 @@ def unregister():
     del bpy.types.Light.time_flags
     del bpy.types.Light.light_flags
     del bpy.types.Light.is_capsule
-    del bpy.types.WindowManager.sz_light_presets
-    del bpy.types.WindowManager.sz_light_preset_index
-    del bpy.types.WindowManager.sz_shader_presets
-    del bpy.types.WindowManager.sz_shader_preset_index
     del bpy.types.Scene.create_seperate_drawables
     del bpy.types.Scene.auto_create_embedded_col
     del bpy.types.Scene.center_drawable_to_selection
-    del bpy.types.Scene.sollumz_auto_lod_ref_mesh
-    del bpy.types.Scene.sollumz_auto_lod_levels
-    del bpy.types.Scene.sollumz_auto_lod_decimate_step
     del bpy.types.Scene.sollumz_extract_lods_levels
     del bpy.types.Scene.sollumz_extract_lods_parent_type
 
