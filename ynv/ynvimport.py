@@ -113,7 +113,7 @@ def polygons_to_mesh(name: str, polygons: Sequence[NavPolygon]) -> Mesh:
             edge_adjacent_poly = (edge_adjacent_poly_indices[0] & 0xFFFF) | ((edge_adjacent_poly_indices[1] << 16) & 0xFFFF0000)
             # TODO: is idx actually the correct edge? Not really sure what Mesh.from_pydata does, we are assuming edges
             # are created in the same order vertex indices are added to faces
-            edge_data[idx, :] = edge_data0, edge_data1, edge_adjacent_poly  
+            edge_data[idx, :] = edge_data0, edge_data1, edge_adjacent_poly
             #if idx == 17254:
             #    print(f"{edge_data0, edge_data1, edge_adjacent_poly=}")
             #    print(f"{edge_data[idx, :]=}")
