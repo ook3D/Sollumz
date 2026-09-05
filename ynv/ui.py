@@ -228,7 +228,10 @@ class SOLLUMZ_PT_NAVMESH_COVER_POINT_PANEL(Panel):
         cover_point_props = cover_point_obj.sz_nav_cover_point
 
         layout.prop(cover_point_props, "cover_type")
-        layout.prop(cover_point_props, "disabled")
+        if cover_point_props.cover_type == "RAW":
+            layout.prop(cover_point_props, "raw_type")
+        else:
+            layout.prop(cover_point_props, "disabled")
 
 
 class SOLLUMZ_PT_NAVMESH_LINK_PANEL(Panel):
@@ -267,6 +270,8 @@ class SOLLUMZ_PT_NAVMESH_LINK_PANEL(Panel):
                 link_obj = aobj.parent
         link_props = link_obj.sz_nav_link
         layout.prop(link_props, "link_type")
+        if link_props.link_type == "RAW":
+            layout.prop(link_props, "raw_type")
         layout.prop(link_props, "heading")
         layout.prop(link_props, "auto_bind")
         if link_props.auto_bind:

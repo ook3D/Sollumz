@@ -59,21 +59,26 @@ NavCoverTypeEnumItems = tuple((enum.name, label, desc, enum.value) for enum, lab
 
 
 class NavCoverPointProps(PropertyGroup):
-    cover_type: EnumProperty(name="Type", items=NavCoverTypeEnumItems, default=NavCoverType.LOW_WALL.name)
+    cover_type: EnumProperty(name="Type", items=NavCoverTypeEnumItems + (
+        ("RAW", "Raw Value", "Preserve an unrecognized point type", 256),
+    ), default=NavCoverType.LOW_WALL.name)
+    raw_type: IntProperty(name="Raw Type", min=0, max=255)
     disabled: BoolProperty(name="Disabled", default=False)
 
     def get_raw_int(self) -> int:
+        if self.cover_type == "RAW":
+            return self.raw_type
         cover_type_int = NavCoverType[self.cover_type].value
         disabled_int = 0x8 if self.disabled else 0
         return cover_type_int | disabled_int
 
     def set_raw_int(self, value):
+        self.raw_type = value
         cover_type_int = value & 0x7
-        if cover_type_int <= 5:
+        if cover_type_int <= 5 and value & ~0xF == 0:
             self.cover_type = NavCoverType(cover_type_int).name
         else:
-            # in case of corrupted out-of-range values, default to low-wall
-            self.cover_type = NavCoverType.LOW_WALL.name
+            self.cover_type = "RAW"
         self.disabled = (value & 0x8) != 0
 
 
@@ -91,13 +96,26 @@ NavLinkTypeEnumItems = tuple((enum.name, label, desc, enum.value) for enum, labe
 
 
 class NavLinkProps(PropertyGroup):
-    link_type: EnumProperty(name="Type", items=NavLinkTypeEnumItems, default=NavLinkType.CLIMB_LADDER.name)
+    link_type: EnumProperty(name="Type", items=NavLinkTypeEnumItems + (
+        ("RAW", "Raw Value", "Preserve an unrecognized portal type", 256),
+    ), default=NavLinkType.CLIMB_LADDER.name)
+    raw_type: IntProperty(name="Raw Type", min=0, max=255)
     heading: FloatProperty(name="Heading", subtype="ANGLE", unit="ROTATION")
     auto_bind: BoolProperty(name="Bind Polygons from Endpoints", default=False,
                             description="Find the polygon beneath each portal endpoint on export")
     bind_distance: FloatProperty(name="Binding Distance", default=2.0, min=0.001, subtype="DISTANCE")
     poly_from: IntProperty(name="Poly From", min=0, max=16382)
     poly_to: IntProperty(name="Poly To", min=0, max=16382)
+
+    def get_raw_int(self) -> int:
+        return self.raw_type if self.link_type == "RAW" else NavLinkType[self.link_type].value
+
+    def set_raw_int(self, value):
+        self.raw_type = value
+        try:
+            self.link_type = NavLinkType(value).name
+        except ValueError:
+            self.link_type = "RAW"
 
 
 def _edge_attr_getter(attr_name: str):

@@ -10,7 +10,6 @@ from szio.gta5.cwxml import (
 )
 from ..sollumz_properties import SollumType
 from .navmesh_attributes import NavMeshAttr
-from .properties import NavLinkType
 from typing import Sequence
 
 
@@ -47,7 +46,7 @@ def links_to_obj(links: Sequence[NavLink]) -> Object:
         from_obj.empty_display_size = 0.65
         from_obj.empty_display_type = "SPHERE"
         from_obj.location = link.position_from
-        from_obj.sz_nav_link.link_type = NavLinkType(link.type).name
+        from_obj.sz_nav_link.set_raw_int(link.type)
         from_obj.sz_nav_link.heading = link.angle
         from_obj.sz_nav_link.poly_from = link.poly_from
         from_obj.sz_nav_link.poly_to = link.poly_to

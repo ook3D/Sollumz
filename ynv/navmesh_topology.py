@@ -79,11 +79,36 @@ def initialize_mesh(mesh, imported=False):
     mesh["sz_navmesh_schema"] = 2
 
 
-def polygon_order(mesh):
+def vehicle_can_reindex(obj):
+    """New standalone meshes have no external polygon IDs to preserve."""
+    from ..sollumz_properties import SollumType
+
+    return (
+        area_id(obj) == 10000
+        and "sz_navmesh_source_polygons" not in obj.data
+        and (
+            obj.data.get("sz_navmesh_reserved_count", 0) != len(obj.data.polygons)
+            or any(
+                datum.value != i + 1
+                for i, datum in enumerate(obj.data.attributes[NavMeshAttr.POLY_ID].data)
+            )
+        )
+        and not any(
+            child.sollum_type == SollumType.NAVMESH_LINK and not child.sz_nav_link.auto_bind
+            for child in obj.children_recursive
+        )
+    )
+
+
+def polygon_order(mesh, *, allow_reindex=False):
     """Return mesh-face indices in export order without changing any stored ID."""
     attr = mesh.attributes.get(NavMeshAttr.POLY_ID)
     if attr is None:
         raise NavmeshError("Initialize this mesh with Convert to Navmesh before exporting.")
+    if allow_reindex:
+        if not 1 <= len(mesh.polygons) <= MAX_POLYGONS:
+            raise NavmeshError(f"A navmesh must contain 1 to {MAX_POLYGONS} polygons.")
+        return list(range(len(mesh.polygons)))
     reserved = int(mesh.get("sz_navmesh_reserved_count", 0))
     slots = {}
     new = []
@@ -168,7 +193,8 @@ def snapshot(obj):
             raise NavmeshError(
                 f"'{obj.name}' has missing or incompatible navmesh attributes. Reimport its XML or convert a mesh copy."
             )
-    order = polygon_order(mesh)
+    reindex = vehicle_can_reindex(obj)
+    order = polygon_order(mesh, allow_reindex=reindex)
     area = area_id(obj)
     if ("sz_navmesh_source_area" in mesh and mesh["sz_navmesh_source_area"] != area) or (
         "sz_navmesh_linked_area" in obj and obj["sz_navmesh_linked_area"] != area
@@ -227,7 +253,7 @@ def snapshot(obj):
         loops.append(ploops)
         for i, loop in enumerate(ploops):
             read = lambda attr: mesh.attributes[attr].data[loop].value
-            is_new = mesh.attributes[NavMeshAttr.POLY_ID].data[mesh_face].value == 0 or not read(
+            is_new = reindex or mesh.attributes[NavMeshAttr.POLY_ID].data[mesh_face].value == 0 or not read(
                 NavMeshAttr.EDGE_INITIALIZED
             )
             adjacent = NONE if is_new else unpack_reference(read(NavMeshAttr.EDGE_ADJACENT_POLY))
@@ -250,7 +276,7 @@ def snapshot(obj):
     return Snapshot(obj, area, order, vertices, loops, edges, unchanged, source)
 
 
-def match_edges(snapshots, tolerance=TOLERANCE):
+def match_edges(snapshots, tolerance=TOLERANCE, *, preserve_unchanged=False):
     """Match opposite directed edges by position, also across unwelded faces."""
     buckets = {}
     all_edges = [(si, ei, edge) for si, snap in enumerate(snapshots) for ei, edge in enumerate(snap.edges)]
@@ -261,6 +287,7 @@ def match_edges(snapshots, tolerance=TOLERANCE):
     for si, ei, edge in all_edges:
         buckets.setdefault(key(edge.start), []).append((si, ei, edge))
     matches = {}
+    by_area = {snap.area: snap for snap in snapshots}
     for si, ei, edge in all_edges:
         if (edge.start - edge.end).length < tolerance:
             continue
@@ -284,6 +311,17 @@ def match_edges(snapshots, tolerance=TOLERANCE):
                 if close(edge.end, other.start) and close(edge.start, other.end):
                     candidates.append((sj, ej))
         if len(candidates) > 1:
+            snap = snapshots[si]
+            if (
+                preserve_unchanged
+                and edge.face in snap.unchanged
+                and all(snapshots[sj].edges[ej].face in snapshots[sj].unchanged for sj, ej in candidates)
+                and all(
+                    ref == NONE or ref[0] not in by_area or ref[1] in by_area[ref[0]].unchanged
+                    for ref in (edge.adjacent, edge.original)
+                )
+            ):
+                continue
             raise NavmeshError(
                 f"Ambiguous edge on '{snapshots[si].obj.name}', polygon {edge.face}; more than one adjacent face."
             )
@@ -324,8 +362,30 @@ def validate_preserved_borders(snap):
             )
 
 
+def polygon_lies_along_edge(snap, face, references):
+    """Identify boundary edges, including unlinked ones (IdentifyEdgePolys)."""
+    if snap.area < 10000:
+        from .navmesh import navmesh_grid_get_cell_bounds
+
+        low, high = navmesh_grid_get_cell_bounds(snap.area % 100, snap.area // 100)
+    else:
+        vertices = [v for polygon in snap.vertices for v in polygon]
+        low = Vector(tuple(min(v[i] for v in vertices) for i in range(3)))
+        high = Vector(tuple(max(v[i] for v in vertices) for i in range(3)))
+    vertices = snap.vertices[face]
+    return any(
+        ref[0] != snap.area
+        and any(
+            abs(start[axis] - bound[axis]) <= TOLERANCE
+            and abs(end[axis] - bound[axis]) <= TOLERANCE
+            for axis in (0, 1) for bound in (low, high)
+        )
+        for start, end, ref in zip(vertices, vertices[1:] + vertices[:1], references)
+    )
+
+
 def local_references(snap):
-    matches = match_edges([snap])
+    matches = match_edges([snap], preserve_unchanged=True)
     result = {}
     for i, edge in enumerate(snap.edges):
         adjacent, original = edge.adjacent, edge.original
@@ -355,7 +415,7 @@ def rebuild_links(objects):
         raise NavmeshError("No navigation meshes are loaded.")
     if len({s.area for s in snaps}) != len(snaps):
         raise NavmeshError("More than one loaded navmesh has the same Area ID. Select one sector set at a time.")
-    matches = match_edges(snaps)
+    matches = match_edges(snaps, preserve_unchanged=True)
     areas = {s.area for s in snaps}
     by_area = {s.area: s for s in snaps}
     changes = []
@@ -376,6 +436,16 @@ def rebuild_links(objects):
         for ei, edge in enumerate(snap.edges):
             if edge.special:
                 continue
+            found = matches.get((si, ei))
+            if (
+                edge.face in snap.unchanged
+                and (found is None or snaps[found[0]].edges[found[1]].face in snaps[found[0]].unchanged)
+                and all(
+                    r == NONE or r[0] not in by_area or r[1] in by_area[r[0]].unchanged
+                    for r in (edge.adjacent, edge.original)
+                )
+            ):
+                continue
             external = [r for r in (edge.adjacent, edge.original) if r != NONE and r[0] != snap.area]
             if external and all(r[0] not in areas for r in external):
                 continue
@@ -385,7 +455,6 @@ def rebuild_links(objects):
                 and all(r[0] not in by_area or r[1] in by_area[r[0]].unchanged for r in external)
             ):
                 continue
-            found = matches.get((si, ei))
             if found:
                 other, index = found
                 ref = snaps[other].area, snaps[other].edges[index].face
@@ -410,14 +479,15 @@ def rebuild_links(objects):
         mesh.attributes[NavMeshAttr.EDGE_DATA_1].data[loop].value = signed_int(data1)
     for snap in snaps:
         commit_polygon_ids(snap.obj.data, snap.order)
-        for poly in snap.obj.data.polygons:
-            border = any(
-                (ref := unpack_reference(snap.obj.data.attributes[NavMeshAttr.EDGE_ADJACENT_POLY].data[loop].value))
-                != NONE
-                and ref[0] != snap.area
-                for loop in poly.loop_indices
-            )
-            datum = snap.obj.data.attributes[NavMeshAttr.POLY_DATA_1].data[poly.index]
+        for face, mesh_face in enumerate(snap.order):
+            if face in snap.unchanged:
+                border = bool(snap.source[face]["flags"][2] & 4)
+            else:
+                border = polygon_lies_along_edge(snap, face, [
+                    unpack_reference(snap.obj.data.attributes[NavMeshAttr.EDGE_ADJACENT_POLY].data[loop].value)
+                    for loop in snap.loops[face]
+                ])
+            datum = snap.obj.data.attributes[NavMeshAttr.POLY_DATA_1].data[mesh_face]
             datum.value = datum.value | 4 if border else datum.value & ~4
         remember_borders(snap.obj)
         snap.obj.data.update()

@@ -37,6 +37,67 @@ def quad(x, y, z=0, size=10):
     return [(x, y, z), (x + size, y, z), (x + size, y + size, z), (x, y + size, z)]
 
 
+def test_point_and_portal_properties_preserve_all_byte_values():
+    obj = bpy.data.objects.new("raw_types", None)
+    for value in range(256):
+        obj.sz_nav_link.set_raw_int(value)
+        obj.sz_nav_cover_point.set_raw_int(value)
+        assert obj.sz_nav_link.get_raw_int() == value
+        assert obj.sz_nav_cover_point.get_raw_int() == value
+
+
+@pytest.mark.parametrize("protected", [None, "imported", "manual_portal"])
+def test_vehicle_deleted_starter_polygon(tmp_path, protected):
+    obj = make_nav([quad(20, 0), quad(0, 0), quad(0, 0, z=3)])
+    if protected == "imported":
+        obj = navmesh_to_obj(navmesh_from_object(obj), str(tmp_path / "vehicle.ynv.xml"))
+    portal = create_portal(obj, Vector((5, 5, 0)), Vector((5, 5, 3)))
+    portal.sz_nav_link.auto_bind = protected != "manual_portal"
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    bm.faces.remove(bm.faces[0])
+    bm.to_mesh(obj.data)
+    bm.free()
+    bpy.context.view_layer.update()
+    path = str(tmp_path / "edited.ynv.xml")
+    if protected:
+        with pytest.raises(NavmeshError, match="deleted"):
+            export_ynv(obj, path)
+    else:
+        assert export_ynv(obj, path)
+        nav = YNV.from_xml_file(path)
+        assert len(nav.polygons) == 2
+        assert (nav.portals[0].poly_from, nav.portals[0].poly_to) == (0, 1)
+        assert "Vehicle" in nav.content_flags
+        assert export_ynv(obj, path)
+
+
+@pytest.mark.parametrize("portal_type", [0, 1, 2, 3, 254, 255])
+def test_raw_types_survive_xml_import_export(tmp_path, portal_type):
+    from szio.gta5.cwxml import NavPoint
+
+    obj = make_nav([quad(0, 0), quad(0, 0, z=3)])
+    create_portal(obj, Vector((5, 5, 0)), Vector((5, 5, 3)))
+    bpy.context.view_layer.update()
+    nav = navmesh_from_object(obj)
+    nav.portals[0].type = portal_type
+    point = NavPoint()
+    point.type = 254
+    point.angle = 0
+    point.position = Vector((5, 5, 0))
+    nav.points.append(point)
+    source = str(tmp_path / "source.ynv.xml")
+    nav.write_xml(source)
+    imported = import_ynv(source)
+    bpy.context.view_layer.update()
+    dest = str(tmp_path / "roundtrip.ynv.xml")
+    assert export_ynv(imported, dest)
+    result = YNV.from_xml_file(dest)
+    assert result.portals[0].type == portal_type
+    assert result.points[0].type == 254
+
+
 def make_nav(faces, aid=10000):
     vertices = [v for f in faces for v in f]
     indices, start = [], 0
@@ -117,7 +178,7 @@ def test_append_new_face_keeps_existing_border_indices():
 
 @pytest.mark.parametrize("change", ["delete", "duplicate"])
 def test_ambiguous_or_missing_persistent_ids_are_rejected(change):
-    obj = make_nav([quad(0, 0), quad(20, 0)])
+    obj = make_nav([quad(0, 0), quad(20, 0)], 4040)
     if change == "delete":
         bm = bmesh.new()
         bm.from_mesh(obj.data)
@@ -375,6 +436,53 @@ def test_new_polygon_connects_reciprocally_to_unchanged_imported_face(tmp_path):
     nav = navmesh_from_object(imported)
     assert refs(nav.polygons[0])[1] == [(10000, 1)] * 2
     assert refs(nav.polygons[1])[3] == [(10000, 0)] * 2
+
+
+def test_rebuild_restores_imported_boundary_flag_without_neighbor(tmp_path):
+    obj = make_nav([quad(0, 0)], 4040)
+    source = navmesh_from_object(obj)
+    assert int(source.polygons[0].flags.split()[2]) & 4
+    imported = navmesh_to_obj(source, str(tmp_path / "boundary.ynv.xml"))
+    bpy.data.objects.remove(obj, do_unlink=True)
+    # Simulate the previous rebuild clearing a flag on an unlinked boundary.
+    datum = imported.data.attributes[NavMeshAttr.POLY_DATA_1].data[0]
+    datum.value &= ~4
+    rebuild_links([imported])
+    assert imported.data.attributes[NavMeshAttr.POLY_DATA_1].data[0].value & 4
+    assert int(navmesh_from_object(imported).polygons[0].flags.split()[2]) & 4
+
+
+@pytest.mark.parametrize("position,expected", [(0, True), (10, False)])
+def test_new_unlinked_boundary_flags(position, expected):
+    obj = make_nav([quad(position, 10)], 4040)
+    rebuild_links([obj])
+    assert bool(obj.data.attributes[NavMeshAttr.POLY_DATA_1].data[0].value & 4) == expected
+    assert bool(int(navmesh_from_object(obj).polygons[0].flags.split()[2]) & 4) == expected
+
+
+@pytest.mark.parametrize("edit", [False, True])
+def test_imported_ambiguous_edges_preserve_references_unless_edited(tmp_path, edit):
+    obj = make_nav([quad(0, 0), quad(10, 0)])
+    source = navmesh_from_object(obj)
+    source.polygons.append(NavPolygon.from_xml(source.polygons[1].to_xml()))
+    imported = navmesh_to_obj(source, str(tmp_path / "overlapping.ynv.xml"))
+    if edit:
+        # Keep the shared edge coincident, but change the candidate polygon.
+        imported.data.vertices[9].co.x += 1
+        with pytest.raises(NavmeshError, match="Ambiguous edge"):
+            navmesh_from_object(imported)
+        with pytest.raises(NavmeshError, match="Ambiguous edge"):
+            rebuild_links([imported])
+    else:
+        dest = str(tmp_path / "preserved.ynv.xml")
+        assert export_ynv(imported, dest)
+        result = YNV.from_xml_file(dest)
+        assert [refs(p) for p in result.polygons] == [refs(p) for p in source.polygons]
+        assert [p.edges_flags.split() for p in result.polygons] == [p.edges_flags.split() for p in source.polygons]
+        rebuild_links([imported])
+        rebuilt = navmesh_from_object(imported)
+        assert [refs(p) for p in rebuilt.polygons] == [refs(p) for p in source.polygons]
+        assert [p.edges_flags.split() for p in rebuilt.polygons] == [p.edges_flags.split() for p in source.polygons]
 
 
 def test_linked_sector_area_id_cannot_be_changed():

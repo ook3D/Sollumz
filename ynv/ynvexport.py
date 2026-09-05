@@ -22,8 +22,9 @@ from .navmesh_topology import (
     match_edges,
     TOLERANCE,
     reference_flags,
+    polygon_lies_along_edge,
+    vehicle_can_reindex,
 )
-from .properties import NavLinkType
 
 
 def _descendants(obj, sollum_type):
@@ -73,7 +74,7 @@ def link_from_object(link_obj, root=None, snap=None):
     snap = snap or snapshot(root)
     props = link_obj.sz_nav_link
     result = NavLink()
-    result.type = NavLinkType[props.link_type].value
+    result.type = props.get_raw_int()
     result.angle = wrap_angle(props.heading)
     result.position_from = _position(link_obj, root)
     result.position_to = _position(targets[0], root)
@@ -118,7 +119,7 @@ def _validate_neighbors(snap):
             raise NavmeshError(f"Multiple loaded objects have neighbour Area ID {aid}.")
         neighbors[aid] = snapshot(obj)
     snaps = [snap] + list(neighbors.values())
-    matches = match_edges(snaps)
+    matches = match_edges(snaps, preserve_unchanged=True)
     neighbor_slot = {s.area: i for i, s in enumerate(snaps)}
     for i, edge in enumerate(snap.edges):
         for ref in (edge.adjacent, edge.original):
@@ -129,8 +130,7 @@ def _validate_neighbors(snap):
             continue
         target_snap = neighbors[ref[0]]
         if edge.face in snap.unchanged and ref[1] in target_snap.unchanged:
-            if any(e.face == ref[1] and e.adjacent == (snap.area, edge.face) for e in target_snap.edges):
-                continue
+            continue
         other = matches.get((0, i))
         if other is None or other[0] != neighbor_slot[ref[0]]:
             raise NavmeshError(
@@ -168,8 +168,8 @@ def polygons_from_object(navmesh_obj, snap=None):
         )
         if index not in snap.unchanged:
             flag0 = (flag0 & ~3) | (1 if polygon_area < 2 else 0) | (2 if polygon_area > 40 else 0)
-        border = any(r != NONE and r[0] != snap.area for loop in loops for r in refs[loop])
         if index not in snap.unchanged:
+            border = polygon_lies_along_edge(snap, index, [refs[loop][0] for loop in loops])
             flag2 = (flag2 | 4) if border else (flag2 & ~4)
         centroid = sum(vertices, Vector()) / len(vertices)
         low = Vector(tuple(math.floor(min(v[i] for v in vertices) / 0.25) * 0.25 for i in range(3)))
@@ -270,7 +270,7 @@ def commit_export(obj, nav):
     from .navmesh_attributes import signed_int
 
     mesh = obj.data
-    order = polygon_order(mesh)
+    order = polygon_order(mesh, allow_reindex=vehicle_can_reindex(obj))
     for face, poly in zip(order, nav.polygons):
         loop_indices = list(mesh.polygons[face].loop_indices)
 
