@@ -500,12 +500,14 @@ class SOLLUMZ_OT_vehicle_preview_generated_windows(bpy.types.Operator):
         vw_bone_names = []
         vw_textures = []
         vw_batches = []
-        children = frag.physics.lod1.children
+        phys_lod = frag.physics.lod1
+        children = phys_lod.children
         for w in vw:
             child = children[w.component_id]
+            bone_tag = phys_lod.groups[child.group_index].bone_tag
             window_bone = None
             for bone in frag_obj.data.bones:
-                if bone.bone_properties.tag != child.bone_tag:
+                if bone.bone_properties.tag != bone_tag:
                     continue
 
                 window_bone = bone

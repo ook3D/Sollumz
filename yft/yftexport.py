@@ -409,7 +409,6 @@ def create_frag_phys_lod(
     children, hi_children, has_child_meshes = create_frag_phys_children(
         frag_objs,
         main_drawable, main_hi_drawable,
-        skeleton,
         groups,
         composite, damaged_composite,
         materials, hi_materials,
@@ -425,7 +424,7 @@ def create_frag_phys_lod(
     if groups and children:
         calculate_frag_phys_groups_total_masses(groups, children)
         calculate_frag_phys_child_drawable_matrices(
-            children, composite, damaged_composite, skeleton, bone_transforms_set
+            children, groups, composite, damaged_composite, skeleton, bone_transforms_set
         )
 
         sort_frag_phys_children_and_collisions_inplace(children, hi_children, composite, damaged_composite)
@@ -523,7 +522,7 @@ def create_frag_phys_groups(
             continue
 
         bone_index = get_bone_index(frag_obj.data, bone)
-        group = init_frag_phys_group(bone.name, bone.group_properties)
+        group = init_frag_phys_group(bone.name, bone.bone_properties.tag, bone.group_properties)
         groups_by_bone[bone_index].append(group)
 
         if bone.group_properties.flags[GroupFlagBit.USE_GLASS_WINDOW]:
@@ -542,10 +541,10 @@ def create_frag_phys_groups(
             group_ind_by_name[group.name] = i
 
     def _get_group_parent_index(group_bone: bpy.types.Bone) -> int:
-        """Returns parent group index or 255 if there is no parent."""
+        """Returns parent group index or -1 if there is no parent."""
         parent_bone = group_bone.parent
         if parent_bone is None:
-            return 255
+            return -1
 
         if not parent_bone.sollumz_use_physics or parent_bone.name not in group_ind_by_name:
             # Parent has no frag group, try with grandparent
@@ -568,14 +567,15 @@ def create_frag_phys_groups(
     return final_groups, glass_windows
 
 
-def init_frag_phys_group(name: str, group_props: GroupProperties) -> PhysGroup:
+def init_frag_phys_group(name: str, bone_tag: int, group_props: GroupProperties) -> PhysGroup:
     flags = 0
     for i in range(len(group_props.flags)):
         flags |= (1 << i) if group_props.flags[i] else 0
 
     return PhysGroup(
         name=name,
-        parent_group_index=255,
+        parent_group_index=-1,
+        bone_tag=bone_tag,
         flags=flags,
         total_mass=0.0,
         strength=group_props.strength,
@@ -610,7 +610,6 @@ def create_frag_phys_children(
     frag_objs: FragmentObjects,
     main_drawable: AssetFragDrawable,
     main_hi_drawable: AssetFragDrawable | None,
-    skeleton: Skeleton,
     groups: list[PhysGroup],
     bound_composite: AssetBoundComposite,
     damaged_bound_composite: AssetBoundComposite | None,
@@ -626,9 +625,6 @@ def create_frag_phys_children(
     Returns a tuple with the list of children, an optional list of children with very-high LOD drawables, and a bool
     indicating whether any children has drawable models.
     """
-    frag_obj = frag_objs.fragment
-    frag_armature = frag_obj.data
-    bones = skeleton.bones
     child_meshes = find_frag_phys_children_meshes(frag_objs)
     child_cols = find_frag_phys_children_collisions(frag_objs)
     damaged_child_cols = (
@@ -656,8 +652,6 @@ def create_frag_phys_children(
             else:
                 damaged_bound_index = None
 
-            bone = frag_armature.bones.get(bone_name)
-            bone_index = get_bone_index(frag_armature, bone) or 0
             group_index = find_phys_group_index_by_name(groups, bone_name)
 
             mesh_objs = None
@@ -688,7 +682,6 @@ def create_frag_phys_children(
                 calculate_frag_phys_child_inertia(damaged_bound_composite, damaged_mass, damaged_bound_index) \
                 if damaged_col_obj else Vector((0.0, 0.0, 0.0, 0.0))
             child = PhysChild(
-                bone_tag=bones[bone_index].tag,
                 group_index=group_index,
                 pristine_mass=pristine_mass,
                 damaged_mass=damaged_mass,
@@ -785,6 +778,7 @@ def sort_frag_phys_children_and_collisions_inplace(
 
 def calculate_frag_phys_child_drawable_matrices(
     children: list[PhysChild],
+    groups: list[PhysGroup],
     bound_composite: AssetBoundComposite,
     damaged_bound_composite: AssetBoundComposite | None,
     skeleton: Skeleton,
@@ -804,7 +798,7 @@ def calculate_frag_phys_child_drawable_matrices(
             continue
 
         for i, child in enumerate(children):
-            bone_transform = bone_transform_by_tag[child.bone_tag]
+            bone_transform = bone_transform_by_tag[groups[child.group_index].bone_tag]
 
             col = cols[i]
             if not col:
@@ -995,9 +989,8 @@ def calculate_frag_phys_link_attachments(
     for group_index, group in enumerate(groups):
         link_index = 0  # by default add to root link
 
-        if group.parent_group_index != 255:
-            _, first_child = children_by_group[group_index][0]
-            bone = next(b for b in bones if b.tag == first_child.bone_tag)
+        if group.parent_group_index != -1:
+            bone = next(b for b in bones if b.tag == group.bone_tag)
             creates_new_link = bone.rotation_limit is not None or bone.translation_limit is not None
             if creates_new_link:
                 # There is a joint, create a new link
@@ -1018,7 +1011,7 @@ def calculate_frag_phys_link_attachments(
     for link_index, groups in enumerate(links):
         link_total_mass = 0.0
         for group_index, group in enumerate(groups):
-            for child_index_rel, (child_index, child) in enumerate(children_by_group[group_index]):
+            for child_index, child in children_by_group[group_index]:
                 bound = bounds[child_index]
                 if bound is not None:
                     center = bound.composite_transform.transposed() @ bound.cg
@@ -1038,7 +1031,6 @@ def calculate_frag_phys_link_attachments(
     # Calculate child transforms (aka "link attachments", offset from bound to link CG)
     link_attachments = []
     for child_index, child in enumerate(children):
-        # print(f"#{child_index} ({child.bone_tag}) link_index={link_index_by_group[child.group_index]}")
         link_center = links_center_of_gravity[link_index_by_group[child.group_index]]
         bound = bounds[child_index]
         if bound is not None:
@@ -1172,8 +1164,11 @@ def create_frag_vehicle_window_no_shattermap(component_id: int, geometry_index: 
 def create_frag_vehicle_windows(frag: AssetFragment, frag_objs: FragmentObjects) -> list[FragVehicleWindow]:
     """Exports all the vehicle windows found in the fragment."""
     main_drawable = frag.drawable
-    phys_children = frag.physics.lod1.children
-    child_id_by_bone_tag: dict[str, int] = {c.bone_tag: i for i, c in enumerate(phys_children)}
+    phys_lod = frag.physics.lod1
+    phys_children = phys_lod.children
+    child_id_by_bone_tag: dict[int, int] = {
+        phys_lod.groups[c.group_index].bone_tag: i for i, c in enumerate(phys_children)
+    }
     bones = main_drawable.skeleton.bones
 
     generated_vehicle_windows = None
@@ -1552,7 +1547,6 @@ def create_dummy_frag_physics_for_cloth(frag_objs: FragmentObjects, materials: l
     groups, _ = create_frag_phys_groups(frag_objs, materials)
     groups[0].total_mass = 1.0
     child = PhysChild(
-        bone_tag=0,
         group_index=0,
         pristine_mass=1.0,
         damaged_mass=1.0,

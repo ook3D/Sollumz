@@ -266,14 +266,15 @@ def create_frag_collisions(frag: AssetFragment, frag_obj: Object, damaged: bool 
 
 def find_bound_bone(bound_index: int, frag: AssetFragment) -> SkelBone | None:
     """Get corresponding bound bone based on children"""
-    children = frag.physics.lod1.children
+    lod = frag.physics.lod1
+    children = lod.children
 
     if bound_index >= len(children):
         return None
 
-    corresponding_child = children[bound_index]
+    bone_tag = lod.groups[children[bound_index].group_index].bone_tag
     for bone in frag.base_drawable.skeleton.bones:
-        if bone.tag != corresponding_child.bone_tag:
+        if bone.tag != bone_tag:
             continue
 
         return bone
@@ -311,19 +312,13 @@ def apply_phys_groups_to_bones(frag: AssetFragment, frag_obj: Object):
     armature = frag_obj.data
     groups = frag.physics.lod1.groups
 
+    bone_by_tag = {bone.bone_properties.tag: bone for bone in armature.bones}
+
     for group in groups:
-        bone = armature.bones.get(group.name, None)
+        bone = bone_by_tag.get(group.bone_tag, None)
         if bone is None:
-            # Bone not found, try a case-insensitive search
-            group_name_lower = group.name.lower()
-            for armature_bone in armature.bones:
-                if group_name_lower == armature_bone.name.lower():
-                    bone = armature_bone
-                    break
-            else:
-                # Still no bone found
-                logger.warning(f"No bone exists for the physics group {group.name}! Skipping...")
-                continue
+            logger.warning(f"No bone exists for the physics group {group.name} (bone tag #{group.bone_tag})! Skipping...")
+            continue
 
         bone.sollumz_use_physics = True
         apply_phys_group_to_bone(frag, group, bone)
@@ -389,6 +384,7 @@ def create_phys_child_meshes(
     """Create all Fragment.Physics.LOD1.Children meshes. (Only LOD1 currently supported)"""
     lod = frag.physics.lod1
     children = lod.children
+    groups = lod.groups
     hi_children = hi_frag.physics.lod1.children if hi_frag else []
     bones = frag.base_drawable.skeleton.bones
 
@@ -398,11 +394,12 @@ def create_phys_child_meshes(
         if not child.drawable.models:
             continue
 
-        if child.bone_tag not in bone_name_by_tag:
+        bone_tag = groups[child.group_index].bone_tag
+        if bone_tag not in bone_name_by_tag:
             logger.warning("A fragment child has an invalid bone tag! Skipping...")
             continue
 
-        bone_name = bone_name_by_tag[child.bone_tag]
+        bone_name = bone_name_by_tag[bone_tag]
 
         child_drawable = child.drawable
         hi_child_drawable = None
@@ -609,13 +606,14 @@ def create_frag_vehicle_windows(frag: AssetFragment, frag_obj: Object):
 
 def find_frag_vehicle_window_bone(window: FragVehicleWindow, frag: AssetFragment, bones: ArmatureBones) -> Bone:
     """Get bone connected to window based on the bone tag of the physics child associated with the window."""
-    children = frag.physics.lod1.children
+    lod = frag.physics.lod1
+    children = lod.children
     child_index = window.component_id
 
     if not (0 <= child_index < len(children)):
         return bones[0]
 
-    bone_tag = children[child_index].bone_tag
+    bone_tag = lod.groups[children[child_index].group_index].bone_tag
 
     for bone in bones:
         if bone.bone_properties.tag == bone_tag:
