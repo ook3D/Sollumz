@@ -416,6 +416,7 @@ def create_shader_parameter_node(
 
     if rows == 1 and param.type in {ShaderParameterType.FLOAT, ShaderParameterType.FLOAT2,
                                     ShaderParameterType.FLOAT3, ShaderParameterType.FLOAT4}:
+        node.set_range(param.min, param.max)
         node.set("X", param.x)
         if cols > 1:
             node.set("Y", param.y)
