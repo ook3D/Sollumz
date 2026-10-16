@@ -1,10 +1,12 @@
 """Tests for export-time texture compression."""
 
+import struct
 import subprocess
 import sys
 from pathlib import Path
 
 import bpy
+import numpy as np
 import pytest
 
 from .. import known_paths
@@ -23,7 +25,7 @@ from ..shared.texture_compressor import (
     rule_from_preset_dict,
     rules_from_preset_dicts,
 )
-from ..shared.texture_compressor import nvtt
+from ..shared.texture_compressor import compressonator, nvtt
 from ..shared.texture_compressor.session import TextureConversionSession
 from ..ydr.ydrexport import get_embedded_textures_from_materials
 
@@ -211,10 +213,11 @@ BUNDLED_PRESET_NAMES = [
 
 
 @pytest.mark.parametrize("game", ("gta5", "rdr2"))
-@pytest.mark.parametrize("backend", ("nvtt",))
+@pytest.mark.parametrize("backend", ("nvtt", "compressonator"))
 def test_bundled_default_presets(preset_config_dir, backend, game):
     categories = {
         "nvtt": nvtt.NVTT_PRESET_CATEGORIES,
+        "compressonator": compressonator.COMPRESSONATOR_PRESET_CATEGORIES,
     }
     presets = store.load_presets(categories[backend][game])
     rules = rules_from_preset_dicts(presets)
@@ -815,6 +818,169 @@ def test_nvtt_stub_ytd_export_operator(context, tmp_path, nvtt_stub_log, preset_
         txds = context.scene.sz_txds.texture_dictionaries
         txds.remove(next(i for i, t in enumerate(txds) if t.name == txd_name))
         _cleanup(mat, img)
+
+
+COMPRESSONATOR_EXE = Path(compressonator.DEFAULT_EXECUTABLE_PATH)
+requires_compressonator = pytest.mark.skipif(
+    not COMPRESSONATOR_EXE.is_file(), reason="compressonatorcli is not installed at the default path"
+)
+
+
+@pytest.mark.parametrize("game", ("gta5", "rdr2"))
+def test_compressonator_bundled_presets_mirror_nvtt(preset_config_dir, game):
+    cmp_presets = store.load_presets(compressonator.COMPRESSONATOR_PRESET_CATEGORIES[game])
+    nvtt_presets = store.load_presets(nvtt.NVTT_PRESET_CATEGORIES[game])
+
+    def _matching(presets):
+        return [
+            (p["name"], p["data"]["pattern"], p["data"]["parameters"], bool(p["data"]["args_alpha"])) for p in presets
+        ]
+
+    assert _matching(cmp_presets) == _matching(nvtt_presets)
+
+
+def test_compressonator_invalid_args_fail_job(tmp_path):
+    job = CompressJob(tmp_path / "in.png", tmp_path / "out.dds", '-fd "BC1')
+    with log_capture() as logs:
+        compressonator.run_jobs(tmp_path / "compressonatorcli.exe", [job])
+    logs.assert_warning(match="invalid arguments")
+    assert not job.output.exists()
+
+
+def _write_test_png(path, w=64, h=32):
+    img = bpy.data.images.new("compressonator_src", w, h, alpha=True)
+    try:
+        px = np.zeros((h, w, 4), np.float32)
+        px[..., 0] = np.linspace(0, 1, w)[None, :]
+        px[..., 1] = np.linspace(0, 1, h)[:, None]
+        px[..., 2] = 0.25
+        px[..., 3] = 1.0
+        img.pixels.foreach_set(px.ravel())
+        img.filepath_raw = str(path)
+        img.file_format = "PNG"
+        img.save()
+    finally:
+        bpy.data.images.remove(img)
+
+
+@requires_compressonator
+@pytest.mark.parametrize("args, fourcc, mips", (
+    ("-fd BC1 -mipsize 4", b"DXT1", 5),  # 64x32 .. 4x2: compressonatorcli stops on the larger side
+    ("-fd BC3 -nomipmap", b"DXT5", 1),
+    ("-fd BC5 -mipsize 4", b"ATI2", 5),
+    ("-fd BC7 -mipsize 8", b"DX10", 4),
+    ("-fd ARGB_8888 -nomipmap", b"\0\0\0\0", 1),
+))
+def test_compressonator_converts(tmp_path, args, fourcc, mips):
+    from szio.dds import DdsFile
+
+    src_dir = tmp_path / "téxtures ä"  # compressonatorcli cannot open non-ASCII paths itself
+    src_dir.mkdir()
+    out_dir = tmp_path / "out ö"
+    out_dir.mkdir()
+    _write_test_png(src_dir / "rock ñ.png")
+    job = CompressJob(src_dir / "rock ñ.png", out_dir / "rock ñ.dds", args)
+
+    with log_capture() as logs:
+        compressonator.run_jobs(COMPRESSONATOR_EXE, [job])
+    logs.assert_no_warnings_or_errors()
+
+    raw = job.output.read_bytes()
+    assert DdsFile.from_buffer(bytearray(raw)).resolution == (64, 32)
+    assert raw[84:88] == fourcc
+    assert max(1, struct.unpack_from("<I", raw, 28)[0]) == mips
+    assert sorted(p.name for p in out_dir.iterdir()) == ["rock ñ.dds"]  # temporary files cleaned up
+
+
+@pytest.fixture()
+def compressonator_runs(monkeypatch):
+    """Command lines of the compressonatorcli runs."""
+    runs = []
+    real_run = compressonator.subprocess.run
+
+    def counting_run(args, **kwargs):
+        runs.append(args)
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(compressonator.subprocess, "run", counting_run)
+    return runs
+
+
+@requires_compressonator
+def test_compressonator_batches_jobs_by_arguments(tmp_path, compressonator_runs):
+    runs = compressonator_runs
+    jobs = []
+    for i, args in enumerate(("-fd BC1 -mipsize 4", "-fd BC3 -nomipmap", "-fd BC1 -mipsize 4", "-fd BC3 -nomipmap")):
+        _write_test_png(tmp_path / f"tex {i}.png")
+        jobs.append(CompressJob(tmp_path / f"tex {i}.png", tmp_path / f"tex {i}.dds", args))
+
+    with log_capture() as logs:
+        compressonator.run_jobs(COMPRESSONATOR_EXE, jobs)
+    logs.assert_no_warnings_or_errors()
+
+    assert len(runs) == 2  # one folder mode run per distinct arguments
+    assert [job.output.read_bytes()[84:88] for job in jobs] == [b"DXT1", b"DXT5", b"DXT1", b"DXT5"]
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("_cmp_")) == []  # cleaned up
+
+
+@requires_compressonator
+def test_compressonator_without_ascii_dir_converts_one_by_one(tmp_path, compressonator_runs, monkeypatch):
+    monkeypatch.setattr(compressonator, "_ascii_dir", lambda path: None)  # e.g. 8.3 names disabled
+    out_dir = tmp_path / "out ö"
+    out_dir.mkdir()
+    jobs = []
+    for i in range(3):
+        _write_test_png(tmp_path / f"tex ñ {i}.png")
+        jobs.append(CompressJob(tmp_path / f"tex ñ {i}.png", out_dir / f"tex ñ {i}.dds", "-fd BC1"))
+
+    with log_capture() as logs:
+        compressonator.run_jobs(COMPRESSONATOR_EXE, jobs)
+    logs.assert_no_warnings_or_errors()
+    assert len(compressonator_runs) == 3
+    assert sorted(p.name for p in out_dir.iterdir()) == [f"tex ñ {i}.dds" for i in range(3)]
+
+
+@requires_compressonator
+@pytest.mark.parametrize("bad", (0, 2, 4))
+def test_compressonator_unreadable_input_does_not_fail_batch(tmp_path, compressonator_runs, bad):
+    # A folder mode run stops at the first file it cannot read, it is rerun without that file.
+    jobs = []
+    for i in range(5):
+        if i == bad:
+            (tmp_path / f"{i}.png").write_bytes(b"not a png")
+        else:
+            _write_test_png(tmp_path / f"{i}.png")
+        jobs.append(CompressJob(tmp_path / f"{i}.png", tmp_path / f"{i}.dds", "-fd BC1"))
+
+    with log_capture() as logs:
+        compressonator.run_jobs(COMPRESSONATOR_EXE, jobs)
+    logs.assert_warning(match=f"'{bad}.png'")
+    assert not jobs[bad].output.exists()
+    assert all(job.output.is_file() for i, job in enumerate(jobs) if i != bad)
+    assert len(compressonator_runs) <= 2
+
+
+@requires_compressonator
+def test_compressonator_missing_input_fails_job(tmp_path):
+    jobs = [
+        CompressJob(tmp_path / "missing.png", tmp_path / "missing.dds", "-fd BC1"),
+        CompressJob(tmp_path / "ok.png", tmp_path / "ok.dds", "-fd BC1"),
+    ]
+    _write_test_png(tmp_path / "ok.png")
+    with log_capture() as logs:
+        compressonator.run_jobs(COMPRESSONATOR_EXE, jobs)
+    logs.assert_warning(match="missing.png")
+    assert not jobs[0].output.exists()
+    assert jobs[1].output.is_file()  # one failed texture does not affect the others
+
+
+def test_to_settings_compressonator_snapshot(preset_config_dir, isolated_prefs):
+    tc = isolated_prefs.texture_compressor
+    tc.compressor = "COMPRESSONATOR"
+    settings = tc.to_settings()
+    assert settings.run is compressonator.run_jobs
+    assert settings.executable == COMPRESSONATOR_EXE
+    assert [r.name for r in settings.presets_for("gta5")] == BUNDLED_PRESET_NAMES
 
 
 # --- generated images -----------------------------------------------------------------------------

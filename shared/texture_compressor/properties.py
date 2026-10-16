@@ -8,6 +8,8 @@ from ..presets import store
 from . import BACKENDS, CompressorBackend, TextureCompressorSettings, rules_from_preset_dicts, DEFAULT_GAME
 from .nvtt import DEFAULT_EXECUTABLE_PATH as NVTT_DEFAULT_EXECUTABLE_PATH
 
+# Imported after nvtt: the backends register on import, in the order they are listed in the preferences.
+from .compressonator import DEFAULT_EXECUTABLE_PATH as COMPRESSONATOR_DEFAULT_EXECUTABLE_PATH
 
 
 def _save_prefs_on_update(_self, _context):
@@ -42,6 +44,13 @@ class SollumzTextureCompressorPrefs(PropertyGroup):
         description="Path to nvtt_export.exe, included with the NVIDIA Texture Tools Exporter",
         subtype="FILE_PATH",
         default=NVTT_DEFAULT_EXECUTABLE_PATH,
+        update=_save_prefs_on_update,
+    )
+    compressonator_executable_path: StringProperty(
+        name="Executable",
+        description="Path to compressonatorcli, included with AMD Compressonator",
+        subtype="FILE_PATH",
+        default=COMPRESSONATOR_DEFAULT_EXECUTABLE_PATH,
         update=_save_prefs_on_update,
     )
     presets_game: EnumProperty(

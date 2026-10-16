@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "game": "rdr2",
+  "category": "texture_compressor_compressonator",
+  "presets": [
+    {
+      "name": "Script Render Target",
+      "data": {
+        "pattern": "script_rt_*",
+        "parameters": "",
+        "args": "-fd ARGB_8888 -nomipmap",
+        "args_alpha": ""
+      }
+    },
+    {
+      "name": "Tint Palette",
+      "data": {
+        "pattern": "*_pal",
+        "parameters": "TintPaletteTex, vehTintPaletteTex",
+        "args": "-fd ARGB_8888 -nomipmap",
+        "args_alpha": ""
+      }
+    },
+    {
+      "name": "Albedo Palette",
+      "data": {
+        "pattern": "",
+        "parameters": "albedoPaletteTex",
+        "args": "-fd ARGB_8888 -mipsize 4",
+        "args_alpha": ""
+      }
+    },
+    {
+      "name": "Normal",
+      "data": {
+        "pattern": "*_nm, *_n, *_normal, *_normals",
+        "parameters": "BumpTex, bumpTexture, bumpTexture2, BumpTexture_layer0, BumpTexture_layer1, BumpTexture_layer2, BumpTexture_layer3, lyr0NormalTex, lyr1NormalTex, WrinkleTexture, VehWrinkleTexture, tintBumpTexture",
+        "args": "-fd BC1 -mipsize 4",
+        "args_alpha": "-fd BC3 -mipsize 4"
+      }
+    },
+    {
+      "name": "Material",
+      "data": {
+        "pattern": "*_ma, *_mb, *_matb, *_s",
+        "parameters": "SpecularTex, SpecularTex2, SpecularTexture, SpecularTexture2, anisoNoiseSpecTexture, lyr0MaterialATex, lyr1MaterialATex, lyr0MaterialBTex, lyr1MaterialBTex, MaterialMapATexture_layer0, MaterialMapATexture_layer1, MaterialMapATexture_layer2, MaterialMapATexture_layer3, MaterialBTexture, MaterialBTexture2",
+        "args": "-fd BC1 -mipsize 4",
+        "args_alpha": "-fd BC3 -mipsize 4"
+      }
+    },
+    {
+      "name": "Lookup",
+      "data": {
+        "pattern": "",
+        "parameters": "lookupTexture",
+        "args": "-fd BC1 -nomipmap",
+        "args_alpha": "-fd BC3 -nomipmap"
+      }
+    },
+    {
+      "name": "Albedo",
+      "data": {
+        "pattern": "*_ab, *_abal, *_al, *_a, *_abte, *_d, *_dirt",
+        "parameters": "DiffuseTex, DiffuseTex2, dirtDiffuseTex, lyr0DiffuseTex, lyr1DiffuseTex, DiffuseTexture_layer0, DiffuseTexture_layer1, DiffuseTexture_layer2, DiffuseTexture_layer3, tintTexture",
+        "args": "-fd BC1 -mipsize 4",
+        "args_alpha": "-fd BC3 -mipsize 4"
+      }
+    },
+    {
+      "name": "Default",
+      "data": {
+        "pattern": "",
+        "parameters": "",
+        "args": "-fd BC1 -mipsize 4",
+        "args_alpha": "-fd BC3 -mipsize 4"
+      }
+    }
+  ]
+}
