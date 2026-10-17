@@ -44,6 +44,11 @@ def draw_texture_compressor_prefs(layout: UILayout, tc_prefs):
                 row = layout.row()
                 row.operator("wm.url_open", text=f"Download {backend.label}", icon="URL").url = backend.download_url
 
+    layout.prop(tc_prefs, "cache_directory")
+    row = layout.row()
+    row.active = bool(tc_prefs.cache_directory.strip())
+    row.prop(tc_prefs, "cache_size_limit_mb")
+
     categories = backend.preset_categories
     if not categories:
         return

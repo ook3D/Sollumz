@@ -1,15 +1,19 @@
 from pathlib import Path
 
 import bpy
-from bpy.props import EnumProperty, StringProperty
+from bpy.props import EnumProperty, IntProperty, StringProperty
 from bpy.types import PropertyGroup
 
 from ..presets import store
 from . import BACKENDS, CompressorBackend, TextureCompressorSettings, rules_from_preset_dicts, DEFAULT_GAME
+from .cache import executable_fingerprint
 from .nvtt import DEFAULT_EXECUTABLE_PATH as NVTT_DEFAULT_EXECUTABLE_PATH
 
 # Imported after nvtt: the backends register on import, in the order they are listed in the preferences.
 from .compressonator import DEFAULT_EXECUTABLE_PATH as COMPRESSONATOR_DEFAULT_EXECUTABLE_PATH
+
+
+_BYTES_PER_MB = 1024**2
 
 
 def _save_prefs_on_update(_self, _context):
@@ -53,6 +57,28 @@ class SollumzTextureCompressorPrefs(PropertyGroup):
         default=COMPRESSONATOR_DEFAULT_EXECUTABLE_PATH,
         update=_save_prefs_on_update,
     )
+    cache_directory: StringProperty(
+        name="Cache Directory",
+        description=(
+            "Directory where converted textures are kept, so later exports reuse them instead of converting the "
+            "same textures again. '//' is relative to the .blend file. Leave empty to disable the cache"
+        ),
+        subtype="DIR_PATH",
+        default="//.sollumz_texture_cache/",
+        options={"PATH_SUPPORTS_BLEND_RELATIVE"} if bpy.app.version >= (4, 5, 0) else set(),
+        update=_save_prefs_on_update,
+    )
+    cache_size_limit_mb: IntProperty(
+        name="Cache Size Limit (MB)",
+        description=(
+            "Size of the texture cache, in megabytes, past which the least recently used textures are deleted after "
+            "an export"
+        ),
+        default=4 * 1024,
+        min=1,
+        soft_max=32 * 1024,
+        update=_save_prefs_on_update,
+    )
     presets_game: EnumProperty(
         name="Game",
         description="Game whose texture compression presets are shown",
@@ -84,9 +110,25 @@ class SollumzTextureCompressorPrefs(PropertyGroup):
             game: rules_from_preset_dicts(store.load_presets(category))
             for game, category in backend.preset_categories.items()
         }
+        executable = self.executable_path
         return TextureCompressorSettings(
-            executable=self.executable_path, presets_by_game=presets_by_game, run=backend.run
+            executable=executable,
+            presets_by_game=presets_by_game,
+            run=backend.run,
+            cache_dir=self.cache_directory_path,
+            cache_salt=executable_fingerprint(backend.id, executable),
+            cache_size_limit=self.cache_size_limit_mb * _BYTES_PER_MB,
         )
+
+    @property
+    def cache_directory_path(self) -> Path | None:
+        """Absolute path of the texture cache directory, or `None` when the cache is disabled."""
+        path = self.cache_directory.strip()
+        if not path or (
+            path.startswith("//") and not bpy.data.filepath  # .blend relative but unsaved disables the cache
+        ):
+            return None
+        return Path(bpy.path.abspath(path))
 
 
 def compressor_preset_search(self, context, edit_text):

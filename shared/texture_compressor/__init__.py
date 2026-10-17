@@ -167,6 +167,12 @@ class TextureCompressorSettings:
     """Game id -> that game's presets, in matching order."""
     run: Callable[[Path, Sequence[CompressJob]], None]
     """Runs the compressor: `run(executable, jobs)`. Must not raise on conversion problems."""
+    cache_dir: Path | None = None
+    """Directory of the persistent texture cache. If `None`, the cache is disabled."""
+    cache_salt: str = ""
+    """Identifies the compressor build, part of every cache key."""
+    cache_size_limit: int = 4 * 1024**3
+    """Size in bytes past which the least recently used cache entries are pruned after an export."""
 
     def presets_for(self, game: str) -> tuple[PresetRule, ...]:
         """The presets of `game`."""

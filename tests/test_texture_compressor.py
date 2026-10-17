@@ -25,6 +25,7 @@ from ..shared.texture_compressor import (
     rule_from_preset_dict,
     rules_from_preset_dicts,
 )
+from ..shared.texture_compressor import cache as cache_mod
 from ..shared.texture_compressor import compressonator, nvtt
 from ..shared.texture_compressor.session import TextureConversionSession
 from ..ydr.ydrexport import get_embedded_textures_from_materials
@@ -247,11 +248,13 @@ def test_to_settings_none_when_disabled(isolated_prefs):
 def test_to_settings_nvtt_snapshot(preset_config_dir, isolated_prefs):
     tc = isolated_prefs.texture_compressor
     tc.compressor = "NVTT"
+    tc.cache_size_limit_mb = 2048
     settings = tc.to_settings()
     assert settings is not None
     assert settings.run is nvtt.run_batch
     assert settings.executable.name == "nvtt_export.exe"
     assert [r.name for r in settings.presets_for("gta5")] == BUNDLED_PRESET_NAMES
+    assert settings.cache_size_limit == 2 * 1024**3
 
 
 def _fake_run(captured, payload=DDS_PLACEHOLDER):
@@ -983,7 +986,230 @@ def test_to_settings_compressonator_snapshot(preset_config_dir, isolated_prefs):
     assert [r.name for r in settings.presets_for("gta5")] == BUNDLED_PRESET_NAMES
 
 
-# --- generated images -----------------------------------------------------------------------------
+def _payload_run(captured):
+    """Fake compressor run whose outputs identify the input and arguments they were converted from."""
+    def run(executable, jobs):
+        captured.append(list(jobs))
+        for job in jobs:
+            job.output.write_bytes(DDS_HEADER_PLACEHOLDER + f"{job.input.name}|{job.args}".encode())
+
+    return run
+
+
+def _cache_settings(presets, run, cache_dir, salt="compressor-v1", size_limit=4 * 1024**3):
+    return TextureCompressorSettings(
+        executable=Path(sys.executable), presets_by_game={"gta5": tuple(presets)}, run=run,
+        cache_dir=cache_dir, cache_salt=salt, cache_size_limit=size_limit,
+    )
+
+
+def _export_once(settings, mats, items):
+    """One export: prepare + read the textures + cleanup. Returns the DDS bytes by texture name."""
+    session = TextureConversionSession(settings)
+    try:
+        session.prepare(items)
+        with export_context_scope(ExportContext("test", ExportSettings(targets=()), textures=session)):
+            textures = get_embedded_textures_from_materials(mats)
+        out = {}
+        for name, tex in textures.items():
+            if tex.data is not None:
+                with tex.data.open() as f:
+                    out[name] = f.read()
+        return out
+    finally:
+        session.cleanup()
+
+
+def test_cache_second_export_reuses_conversions(context, tmp_path):
+    img1, mat1, node1 = _make_embedded_png(tmp_path, "rock_d", "DiffuseSampler")
+    img2, mat2, node2 = _make_embedded_png(tmp_path, "rock_n", "BumpSampler")
+    captured = []
+    settings = _cache_settings((DIFFUSE_RULE, NORMAL_RULE), _payload_run(captured), tmp_path / "cache")
+    items = [_prepare_item(node1), _prepare_item(node2)]
+    try:
+        first = _export_once(settings, [mat1, mat2], items)
+        assert len(captured) == 1 and len(captured[0]) == 2
+
+        with log_capture() as logs:
+            second = _export_once(settings, [mat1, mat2], items)
+        assert len(captured) == 1  # nothing converted
+        assert second == first
+        assert any("2 reused from cache, 0 converted" in m for m in logs.infos)
+        assert (tmp_path / "cache" / cache_mod.MARKER_NAME).is_file()
+    finally:
+        _cleanup(mat1, img1, mat2, img2)
+
+
+@pytest.mark.parametrize("change", ("pixels", "args", "compressor"))
+def test_cache_misses_when_output_would_change(context, tmp_path, change):
+    img, mat, node = _make_embedded_png(tmp_path, "rock_d", "DiffuseSampler")
+    captured = []
+    rule = DIFFUSE_RULE
+    settings = _cache_settings((rule,), _payload_run(captured), tmp_path / "cache")
+    try:
+        _export_once(settings, [mat], [_prepare_item(node)])
+
+        if change == "pixels":
+            img.pixels = [0.1, 0.9, 0.2, 1.0] * (8 * 8)
+            img.save()
+        elif change == "args":
+            rule = _rule("Diffuse", parameters=("DiffuseSampler",), args=DIFFUSE_RULE.args + " --min-mip-size 4")
+            settings = _cache_settings((rule,), _payload_run(captured), tmp_path / "cache")
+        else:
+            settings = _cache_settings((rule,), _payload_run(captured), tmp_path / "cache", salt="compressor-v2")
+        _export_once(settings, [mat], [_prepare_item(node)])
+        assert len(captured) == 2
+
+        _export_once(settings, [mat], [_prepare_item(node)])
+        assert len(captured) == 2  # the new conversion is cached too
+    finally:
+        _cleanup(mat, img)
+
+
+def test_cache_shared_between_identical_images(context, tmp_path):
+    # The key is the content, not the path: a copy of the same file elsewhere reuses the conversion.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    img1, mat1, node1 = _make_embedded_png(tmp_path / "a", "rock_d", "DiffuseSampler")
+    img2, mat2, node2 = _make_embedded_png(tmp_path / "b", "rock_d", "DiffuseSampler")
+    captured = []
+    settings = _cache_settings((DIFFUSE_RULE,), _payload_run(captured), tmp_path / "cache")
+    try:
+        _export_once(settings, [mat1], [_prepare_item(node1)])
+        _export_once(settings, [mat2], [_prepare_item(node2)])
+        assert len(captured) == 1
+    finally:
+        _cleanup(mat1, img1, mat2, img2)
+
+
+@pytest.mark.parametrize("kind", ("packed", "generated"))
+def test_cache_hit_writes_no_temp_files(context, tmp_path, kind):
+    if kind == "packed":
+        img, mat, node = _make_embedded_png(tmp_path, "rock_d", "DiffuseSampler")
+        img.pack()
+    else:
+        img, mat, node = _make_generated_node("rock_d", "DiffuseSampler")
+    captured = []
+    settings = _cache_settings((DEFAULT_RULE,), _payload_run(captured), tmp_path / "cache")
+    try:
+        _export_once(settings, [mat], [_prepare_item(node)])
+        session = TextureConversionSession(settings)
+        try:
+            session.prepare([_prepare_item(node)])
+            assert session._temp_dir is None  # neither the packed data nor the generated pixels were written
+            assert session.get(img, "rock_d").is_relative_to(tmp_path / "cache")
+        finally:
+            session.cleanup()
+        assert len(captured) == 1
+    finally:
+        _cleanup(mat, img)
+
+
+def test_cache_refuses_non_empty_unmarked_directory(context, tmp_path):
+    cache_dir = tmp_path / "project"
+    cache_dir.mkdir()
+    (cache_dir / "notes.txt").write_text("not a cache")
+    img, mat, node = _make_embedded_png(tmp_path, "rock_d", "DiffuseSampler")
+    captured = []
+    settings = _cache_settings((DEFAULT_RULE,), _payload_run(captured), cache_dir)
+    try:
+        with log_capture() as logs:
+            result = _export_once(settings, [mat], [_prepare_item(node)])
+        logs.assert_warning(match="not a texture cache")
+        assert result["rock_d"].startswith(b"DDS ")  # still converted
+        assert sorted(p.name for p in cache_dir.iterdir()) == ["notes.txt"]
+    finally:
+        _cleanup(mat, img)
+
+
+def test_cache_write_failure_still_exports(context, tmp_path, monkeypatch):
+    def failing_put(self, key, source, move=False):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cache_mod.TextureCache, "put", failing_put)
+    img1, mat1, node1 = _make_embedded_png(tmp_path, "rock_d", "DiffuseSampler")
+    img2, mat2, node2 = _make_embedded_png(tmp_path, "rock_s", "SpecSampler")
+    captured = []
+    settings = _cache_settings((DEFAULT_RULE,), _payload_run(captured), tmp_path / "cache")
+    try:
+        with log_capture() as logs:
+            result = _export_once(settings, [mat1, mat2], [_prepare_item(node1), _prepare_item(node2)])
+        logs.assert_warning(match="disk full", num=1)  # once, then the cache is off for this export
+        assert set(result) == {"rock_d", "rock_s"}
+    finally:
+        _cleanup(mat1, img1, mat2, img2)
+
+
+def test_cache_corrupt_entry_is_reconverted(context, tmp_path):
+    img, mat, node = _make_embedded_png(tmp_path, "rock_d", "DiffuseSampler")
+    captured = []
+    settings = _cache_settings((DEFAULT_RULE,), _payload_run(captured), tmp_path / "cache")
+    try:
+        first = _export_once(settings, [mat], [_prepare_item(node)])
+        entry, = (tmp_path / "cache").glob("??/*.dds")
+        entry.write_bytes(b"DDS ")  # truncated
+
+        assert _export_once(settings, [mat], [_prepare_item(node)]) == first
+        assert len(captured) == 2
+        assert entry.read_bytes() == first["rock_d"]
+    finally:
+        _cleanup(mat, img)
+
+
+def test_cache_prune(tmp_path):
+    import os
+    import time
+
+    cache = cache_mod.TextureCache.open(tmp_path / "cache", "salt")
+    src = tmp_path / "src.dds"
+    src.write_bytes(DDS_HEADER_PLACEHOLDER + b"\0" * 872)  # 1000 bytes
+    now = time.time()
+    keys = [cache.key(f"--args {i}", "digest") for i in range(5)]
+    for age, key in zip((50, 40, 30, 20, 10), keys):  # keys[0] least recently used
+        os.utime(cache.put(key, src), (now - age, now - age))
+    stale_tmp = cache.entry_path(keys[0]).with_name(f"{keys[0]}.dds.abc123.tmp")
+    stale_tmp.write_bytes(b"partial")
+    os.utime(stale_tmp, (now - 2 * cache_mod._TEMP_FILE_MAX_AGE_SECONDS,) * 2)
+    foreign = tmp_path / "cache" / "user_file.dds"
+    foreign.write_bytes(b"keep")
+
+    cache.prune(size_limit=4000)  # 5000 bytes cached: down to 80% (3200), oldest first
+
+    assert [cache.get(k) is not None for k in keys] == [False, False, True, True, True]
+    assert not stale_tmp.exists()
+    assert foreign.read_bytes() == b"keep"
+
+    (tmp_path / "cache" / cache_mod.MARKER_NAME).unlink()
+    cache.prune(size_limit=0)  # unmarked: untouched
+    assert all(cache.get(k) is not None for k in keys[2:])
+
+
+def test_cache_pruned_to_settings_size_limit(context, tmp_path):
+    img, mat, node = _make_embedded_png(tmp_path, "rock_d", "DiffuseSampler")
+    captured = []
+    settings = _cache_settings((DEFAULT_RULE,), _payload_run(captured), tmp_path / "cache", size_limit=1)
+    try:
+        _export_once(settings, [mat], [_prepare_item(node)])
+        assert not list((tmp_path / "cache").glob("??/*.dds"))  # the entry is over the 1 byte limit
+
+        settings = _cache_settings((DEFAULT_RULE,), _payload_run(captured), tmp_path / "cache")
+        _export_once(settings, [mat], [_prepare_item(node)])
+        assert len(list((tmp_path / "cache").glob("??/*.dds"))) == 1
+        assert len(captured) == 2
+    finally:
+        _cleanup(mat, img)
+
+
+def test_cache_directory_path(isolated_prefs, tmp_path):
+    tc = isolated_prefs.texture_compressor
+    assert tc.cache_directory == "//.sollumz_texture_cache/"
+    assert bpy.data.filepath == ""
+    assert tc.cache_directory_path is None  # '//' while unsaved
+    tc.cache_directory = ""
+    assert tc.cache_directory_path is None  # disabled
+    tc.cache_directory = str(tmp_path / "cache")
+    assert tc.cache_directory_path == tmp_path / "cache"
+
 
 def _make_generated_node(name, parameter_name, painted=(1.0, 0.0, 0.0, 1.0)):
     img = bpy.data.images.new(name, 4, 4, alpha=True)

@@ -11,7 +11,15 @@ from bpy.types import Image
 
 from ... import logger
 from . import DEFAULT_GAME, CompressJob, TextureCompressorSettings, find_preset
-from .imageutils import image_has_alpha, image_source_path, is_dds_image, is_generated_image, texture_extension
+from .cache import TextureCache, digest_bytes, digest_file
+from .imageutils import (
+    image_has_alpha,
+    image_source_path,
+    is_dds_image,
+    is_generated_image,
+    is_valid_dds_file,
+    texture_extension,
+)
 
 # Blender image format -> file extension, used to name the temporary input file written for packed
 # images so the compressor recognizes the format.
@@ -30,10 +38,6 @@ _FORMAT_EXT = {
     "IRIS": ".rgb",
     "WEBP": ".webp",
 }
-
-
-# "DDS " magic + DDS_HEADER (124 bytes).
-_DDS_MIN_HEADER_SIZE = 128
 
 
 def _to_rgba(pixels: np.ndarray, channels: int) -> np.ndarray:
@@ -86,6 +90,46 @@ class TextureConversionSession:
     _matched: dict = field(default_factory=dict)
     _temp_dir: Path | None = None
     _unavailable: bool = False  # compressor executable missing, warned once, disabled this export.
+    _cache: TextureCache | None = None
+    _cache_opened: bool = False  # opened on first use (or failed to, in which case `_cache` stays None)
+    _reused: int = 0  # textures taken from the cache, this export
+    _converted: int = 0  # textures converted by the compressor, this export
+
+    def _get_cache(self) -> TextureCache | None:
+        if not self._cache_opened:
+            self._cache_opened = True
+            if self.settings.cache_dir is not None:
+                self._cache = TextureCache.open(self.settings.cache_dir, self.settings.cache_salt)
+        return self._cache
+
+    @staticmethod
+    def _has_input(image: Image) -> bool:
+        packed = image.packed_file
+        return bool(packed and packed.data) or is_generated_image(image) or image_source_path(image).is_file()
+
+    @staticmethod
+    def _input_digest(image: Image) -> str | None:
+        """Hash of the pixels the compressor would read for `image`, or `None` if there is no input."""
+        packed = image.packed_file
+        data = packed.data if packed else None
+        if data:
+            return digest_bytes(bytes(data))
+
+        if is_generated_image(image):
+            width, height = image.size
+            pixels = np.empty(width * height * image.channels, dtype=np.float32)
+            image.pixels.foreach_get(pixels)
+            # Everything `_write_generated` uses
+            meta = (
+                f"{width}x{height}x{image.channels}",
+                str(image.is_float),
+                image.colorspace_settings.name,
+                image.alpha_mode,
+            )
+            return digest_bytes(pixels.tobytes(), "generated", *meta)
+
+        path = image_source_path(image)
+        return digest_file(path) if path.is_file() else None
 
     def _temp_path(self) -> Path:
         if self._temp_dir is None:
@@ -198,50 +242,59 @@ class TextureConversionSession:
                 self._matched[key] = None
                 continue
 
-            input_path = self._resolve_input(image)
-            if input_path is None:
+            if not self._has_input(image):
+                # Export emits the "file does not exist" warning
                 self._results[key] = None
                 continue
 
             # Only scan pixels when the preset has different arguments for transparent textures.
             use_args_alpha = bool(preset.args_alpha) and image_has_alpha(image)
             args = preset.args_for(use_args_alpha)
+
+            cache_key = None
+            if (cache := self._get_cache()) is not None and (digest := self._input_digest(image)) is not None:
+                cache_key = cache.key(args, digest)
+                cached = cache.get(cache_key)
+                if cached is not None and is_valid_dds_file(cached):
+                    self._results[key] = cached
+                    self._matched[key] = preset.name
+                    self._reused += 1
+                    continue
+
+            input_path = self._resolve_input(image)
+            if input_path is None:
+                self._results[key] = None
+                continue
+
             output_dir = self._temp_path() / game
             output_dir.mkdir(exist_ok=True)
             output_path = output_dir / f"{_safe_filename(texture_name)}_{id(image):x}.dds"
             self._results[key] = None  # pending
             self._matched[key] = preset.name
-            queued.append((texture_name, key, CompressJob(input_path, output_path, args)))
+            queued.append((texture_name, key, cache_key, CompressJob(input_path, output_path, args)))
 
         if not queued:
             return
 
         try:
-            settings.run(settings.executable, [job for _, _, job in queued])
+            settings.run(settings.executable, [job for *_, job in queued])
         except Exception:
             logger.warning(f"Texture compression failed:\n{traceback.format_exc()}")
             return
 
-        for texture_name, key, job in queued:
-            if self._is_valid_dds(job.output):
-                self._results[key] = job.output
-            else:
-                logger.warning(
-                    f"Texture '{texture_name}' compression produced no valid DDS output; the "
-                    f"original texture will be used instead."
-                )
+        for texture_name, key, cache_key, job in queued:
+            if not is_valid_dds_file(job.output):
+                logger.warning(f"Texture '{texture_name}' compression produced no valid DDS output.")
+                continue
 
-    @staticmethod
-    def _is_valid_dds(path: Path) -> bool:
-        # Magic plus a complete header. Truncated pixel data is guarded against by the backend,
-        # which deletes all outputs of a failed or timed-out run.
-        try:
-            with open(path, "rb") as f:
-                header = f.read(_DDS_MIN_HEADER_SIZE)
-                has_pixel_data = f.read(1) != b""
-        except OSError:
-            return False
-        return len(header) == _DDS_MIN_HEADER_SIZE and header[:4] == b"DDS " and has_pixel_data
+            self._results[key] = job.output
+            self._converted += 1
+            if cache_key is not None and self._cache is not None:
+                try:
+                    self._results[key] = self._cache.put(cache_key, job.output, move=True)
+                except OSError as e:
+                    logger.warning(f"Texture cache disabled: cannot write to '{self._cache.directory}': {e}")
+                    self._cache = None
 
     def get(self, image: Image, texture_name: str, game: str = DEFAULT_GAME) -> Path | None:
         """The DDS converted by `prepare` for `texture_name` exported for `game`, or `None` when the texture was not
@@ -250,9 +303,17 @@ class TextureConversionSession:
         return self._results.get((id(image), texture_name, game))
 
     def cleanup(self):
+        if self._reused:
+            logger.info(f"Texture compression: {self._reused} reused from cache, {self._converted} converted.")
+        if self._cache is not None:
+            self._cache.prune(self.settings.cache_size_limit)
         if self._temp_dir is not None:
             shutil.rmtree(self._temp_dir, ignore_errors=True)
         self._temp_dir = None
         self._results.clear()
         self._matched.clear()
         self._unavailable = False
+        self._cache = None
+        self._cache_opened = False
+        self._reused = 0
+        self._converted = 0
