@@ -21,7 +21,7 @@ from ...tools.meshhelper import (
     mesh_rename_uv_maps_by_order,
     mesh_rename_color_attrs_by_order,
 )
-from ..shader_materials import (
+from ..gta5.shader_materials import (
     create_shader,
     create_tinted_shader_graph,
     is_tint_material,

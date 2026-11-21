@@ -3,7 +3,7 @@ import bpy
 from ..iecontext import ExportContext, ExportSettings, export_context_scope
 from ..tools.drawablehelper import convert_obj_to_drawable
 from ..tools.meshhelper import mesh_add_missing_uv_maps, mesh_rename_color_attrs_by_order
-from ..ydr.shader_materials import create_shader
+from ..ydr.gta5.shader_materials import create_shader
 from ..ydr.ydrexport import export_ydr
 from .shared import log_capture
 

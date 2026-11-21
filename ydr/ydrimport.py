@@ -14,7 +14,7 @@ from bpy.types import (
 from typing import Optional
 from mathutils import Matrix, Vector, Quaternion
 from pathlib import Path
-from .shader_materials import (
+from .gta5.shader_materials import (
     create_shader,
     get_detail_extra_sampler,
     create_tinted_shader_graph,

@@ -124,7 +124,7 @@ def batch_instance_map_entities(
     entities_to_instance: InstancingBatch,
     userpref_instance_entities: bool = True,
 ):
-    from ..ydr.shader_materials import apply_tint_preview_index
+    from ..ydr.gta5.shader_materials import apply_tint_preview_index
 
     # Cache entities collection into a list for O(1) lookups. Collection properties are
     # a linked-list internally so each index lookup is O(N).

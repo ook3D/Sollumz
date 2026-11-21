@@ -1,4 +1,4 @@
-from ..ydr.shader_materials import shadermats
+from ..ydr.gta5.shader_materials import shadermats
 from ..ybn.collision_materials import collisionmats
 
 SOLLUMZ_SHADERS = list(map(lambda s: s.value, shadermats))

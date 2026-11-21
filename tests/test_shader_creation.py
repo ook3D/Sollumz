@@ -4,7 +4,7 @@ import itertools
 import random
 from .test_fixtures import BLENDER_LANGUAGES, SOLLUMZ_SHADERS, SOLLUMZ_COLLISION_MATERIALS
 from szio.gta5.shader import ShaderManager
-from ..ydr.shader_materials import create_shader, _specular_params
+from ..ydr.gta5.shader_materials import create_shader, _specular_params
 from ..ydr.operators.materials import MaterialConverter
 from ..ybn.collision_materials import create_collision_material_from_index
 from ..ynv.ynvimport import get_material as ynv_get_material

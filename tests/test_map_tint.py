@@ -2,7 +2,7 @@ import bpy
 
 from ..sollumz_properties import SollumType
 from ..tools.blenderhelper import create_blender_object, create_empty_object
-from ..ydr.shader_materials import create_tint_geom_modifier
+from ..ydr.gta5.shader_materials import create_tint_geom_modifier
 from ..ymap_next.properties.map import get_maps
 from .shared import assert_logs_no_errors
 

@@ -22,7 +22,7 @@ from ..sollumz_properties import (
     items_from_enums,
     FlagPropertyGroup,
 )
-from ..ydr.shader_materials import (
+from ..ydr.gta5.shader_materials import (
     VEHICLE_PREVIEW_NODE_DIRT_COLOR,
     VEHICLE_PREVIEW_NODE_DIRT_LEVEL,
     VEHICLE_PREVIEW_NODE_DIRT_WETNESS,

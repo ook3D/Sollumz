@@ -19,7 +19,7 @@ from typing import Optional
 from ..tools.blenderhelper import lod_level_enum_flag_prop_factory
 from ..sollumz_helper import find_sollumz_parent
 from ..sollumz_properties import SOLLUMZ_UI_NAMES, items_from_enums, LODLevel, SollumType, LightType, MaterialType, FlagPropertyGroup, TimeFlagsMixin
-from ..ydr.shader_materials import shadermats, shadermats_by_filename
+from .gta5.shader_materials import shadermats, shadermats_by_filename
 from .render_bucket import RenderBucket, RenderBucketEnumItems, RenderMask, RenderMaskEnumFlagItems
 from .light_flashiness import LightFlashiness, LightFlashinessEnumItems
 from bpy.app.handlers import persistent

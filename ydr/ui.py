@@ -14,7 +14,7 @@ from .operators import (
     lod_tools as lod_ops,
 )
 from .gta5.presets.light import SOLLUMZ_PT_light_presets
-from .shader_materials import shadermats
+from .gta5.shader_materials import shadermats
 from .render_bucket import RenderMaskEnumFlagItems
 from .cable import CableAttr, is_cable_mesh
 from .cloth import ClothAttr

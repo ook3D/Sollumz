@@ -84,7 +84,7 @@ def _new_plane_obj(name: str) -> bpy.types.Object:
 def _add_material_with_texture(obj: bpy.types.Object, img: bpy.types.Image, embedded: bool = True):
     """Adds a default shader material to `obj` with `img` assigned to its DiffuseSampler."""
     from ..tools.meshhelper import mesh_add_missing_color_attrs, mesh_add_missing_uv_maps
-    from ..ydr.shader_materials import create_shader
+    from ..ydr.gta5.shader_materials import create_shader
 
     mat = create_shader("default.sps")
     obj.data.materials.append(mat)

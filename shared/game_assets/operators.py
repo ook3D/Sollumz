@@ -584,7 +584,7 @@ def _replace_entity_objects(
     Returns the replaced library objects mapped to the objects that replace them, and the objects to remove, the library
     objects.
     """
-    from ...ydr.shader_materials import apply_tint_preview_index
+    from ...ydr.gta5.shader_materials import apply_tint_preview_index
 
     # The imported model of each archetype is the drawable or fragment with its name, at the root or in a drawable
     # dictionary

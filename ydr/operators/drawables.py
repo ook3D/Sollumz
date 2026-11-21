@@ -13,7 +13,7 @@ from ...tools.meshhelper import (
     mesh_rename_uv_maps_by_order,
     mesh_rename_color_attrs_by_order,
 )
-from ..shader_materials import shadermats_by_filename
+from ..gta5.shader_materials import shadermats_by_filename
 
 
 class SOLLUMZ_OT_create_drawable(bpy.types.Operator):

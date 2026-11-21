@@ -6,14 +6,14 @@ from szio.gta5.shader import (
     ShaderParameterDef,
     ShaderParameterUiHint,
 )
-from ..sollumz_properties import MaterialType, SollumType, MIN_VEHICLE_LIGHT_ID, MAX_VEHICLE_LIGHT_ID
-from ..tools.blenderhelper import find_bsdf_and_material_output, remove_number_suffix
-from ..tools.animationhelper import add_global_anim_uv_nodes
-from ..tools.meshhelper import get_uv_map_name, get_color_attr_name
-from ..shared.shader_nodes import SzShaderNodeParameter, SzShaderNodeParameterDisplayType
-from ..shared.shader_expr import expr, compile_expr
-from .render_bucket import RenderBucket
-from ..shared.object_hierarchy import ObjectHierarchySnapshot
+from ...sollumz_properties import MaterialType, SollumType, MIN_VEHICLE_LIGHT_ID, MAX_VEHICLE_LIGHT_ID
+from ...tools.blenderhelper import find_bsdf_and_material_output, remove_number_suffix
+from ...tools.animationhelper import add_global_anim_uv_nodes
+from ...tools.meshhelper import get_uv_map_name, get_color_attr_name
+from ...shared.shader_nodes import SzShaderNodeParameter, SzShaderNodeParameterDisplayType
+from ...shared.shader_expr import expr, compile_expr
+from ..render_bucket import RenderBucket
+from ...shared.object_hierarchy import ObjectHierarchySnapshot
 
 
 class ShaderBuilder(NamedTuple):
@@ -410,7 +410,7 @@ def create_tinted_geometry_graph():  # move to blenderhelper.py?
 
     # Read color attribute. We check if there is an isolated attribute for the input color attribute. If so, we
     # read from the isolated attribute instead of the input, so the tint updates as the user paints.
-    from ..editor_tools.vertex_paint.isolate import ISOLATED_ATTR_FORMAT
+    from ...editor_tools.vertex_paint.isolate import ISOLATED_ATTR_FORMAT
     color_attr = gnt.nodes.new("GeometryNodeInputNamedAttribute")
     color_attr.data_type = "FLOAT_COLOR"
     gnt.links.new(input.outputs["Color Attribute"], color_attr.inputs["Name"])
@@ -571,7 +571,7 @@ def _spec_map_is_diffuse(shader: ShaderDef) -> bool:
 
 
 def _param_or(shader: ShaderDef, name: str, default: "expr.Floaty") -> "expr.Floaty":
-    from ..shared.shader_expr.builtins import float_param
+    from ...shared.shader_expr.builtins import float_param
     return float_param(name) if shader.has_parameter(name) else default
 
 
@@ -628,8 +628,8 @@ def _specular_params(shader: ShaderDef):
 
 
 def gta_specular_expr(shader: ShaderDef, spec_tex_name: Optional[str]):
-    from ..shared.shader_expr.builtins import tex, uv, vec, param, saturate, mix_color
-    from ..shared.shader_expr.expr import ColorBlend
+    from ...shared.shader_expr.builtins import tex, uv, vec, param, saturate, mix_color
+    from ...shared.shader_expr.expr import ColorBlend
 
     params = _specular_params(shader)
     if params is None:
@@ -682,14 +682,14 @@ def gta_specular_expr(shader: ShaderDef, spec_tex_name: Optional[str]):
 
 
 def gta_blinn_roughness_expr(exponent: "expr.Floaty") -> "expr.Floaty":
-    from ..shared.shader_expr.builtins import maxf
+    from ...shared.shader_expr.builtins import maxf
 
     blinn_exponent = 3.0 * exponent + 555.0 * maxf(exponent - 500.0, 0.0)
     return (2.0 / (blinn_exponent + 2.0)) ** 0.25
 
 
 def gta_fresnel_ior_expr(fresnel: "expr.Floaty") -> "expr.Floaty":
-    from ..shared.shader_expr.builtins import saturate
+    from ...shared.shader_expr.builtins import saturate
 
     f0 = (1.0 - saturate(fresnel)) * 0.5
     sqrt_f0 = f0 ** 0.5
@@ -697,7 +697,7 @@ def gta_fresnel_ior_expr(fresnel: "expr.Floaty") -> "expr.Floaty":
 
 
 def gta_detail_expr(shader: ShaderDef, detail_tex_name: str, extra_tex_name: str, spec_tex_name: Optional[str]):
-    from ..shared.shader_expr.builtins import tex, uv, vec, param
+    from ...shared.shader_expr.builtins import tex, uv, vec, param
 
     settings = param("detailSettings")
     detail_intensity, detail_bump_intensity = settings.x, settings.y
@@ -726,7 +726,7 @@ def gta_decode_normal_expr(
     uv_index: int,
     bump_offset: Optional["expr.VectorExpr"] = None,
 ) -> "expr.VectorExpr":
-    from ..shared.shader_expr.builtins import vec, normal_map, maxf
+    from ...shared.shader_expr.builtins import vec, normal_map, maxf
 
     packed_x, packed_y = packed.x, packed.y
     if bump_offset is not None:
@@ -751,7 +751,7 @@ def gta_normal_expr(
     bump_offset: Optional["expr.VectorExpr"] = None,
 ) -> "expr.VectorExpr":
     """Tangent-space normal sampled from a bump map. See `gta_decode_normal_expr`."""
-    from ..shared.shader_expr.builtins import tex, uv
+    from ...shared.shader_expr.builtins import tex, uv
 
     uv_index = _uv_index_of(shader, bump_tex_name)
     return gta_decode_normal_expr(shader, tex(bump_tex_name, uv(uv_index)).color, uv_index, bump_offset)
@@ -766,7 +766,7 @@ def _is_displacement(shader: ShaderDef) -> bool:
 
 
 def gta_tangent_view_expr(uv_index: int) -> "expr.VectorExpr":
-    from ..shared.shader_expr.builtins import geometry, tangent, vec
+    from ...shared.shader_expr.builtins import geometry, tangent, vec
 
     view = geometry("Incoming")  # surface -> eye, world space, normalised
     normal = geometry("Normal")
@@ -777,7 +777,7 @@ def gta_tangent_view_expr(uv_index: int) -> "expr.VectorExpr":
 
 
 def gta_parallax_offset_expr(shader: ShaderDef, uv_index: int) -> "expr.VectorExpr":
-    from ..shared.shader_expr.builtins import tex, uv, vec, maxf, saturate, absf
+    from ...shared.shader_expr.builtins import tex, uv, vec, maxf, saturate, absf
 
     tan_view = gta_tangent_view_expr(uv_index)
     height = tex("heightSampler", uv(uv_index)).color.x
@@ -793,7 +793,7 @@ def gta_parallax_offset_expr(shader: ShaderDef, uv_index: int) -> "expr.VectorEx
 
 
 def gta_simple_parallax_offset_expr(shader: ShaderDef, uv_index: int) -> "expr.VectorExpr":
-    from ..shared.shader_expr.builtins import tex, uv, vec
+    from ...shared.shader_expr.builtins import tex, uv, vec
 
     tan_view = gta_tangent_view_expr(uv_index)
     height = tex("BumpSampler", uv(uv_index)).alpha
@@ -815,7 +815,7 @@ def _lerp(a: "expr.Floaty", b: "expr.Floaty", factor: "expr.Floaty") -> "expr.Fl
 
 
 def gta_terrain_parallax_offset_expr(shader: ShaderDef, uv_index: int, blend_node) -> "expr.VectorExpr":
-    from ..shared.shader_expr.builtins import tex, uv, vec, maxf, saturate, absf, float_socket
+    from ...shared.shader_expr.builtins import tex, uv, vec, maxf, saturate, absf, float_socket
 
     lookup_g = float_socket(blend_node, "Green")
     lookup_b = float_socket(blend_node, "Blue")
@@ -839,7 +839,7 @@ def gta_terrain_parallax_offset_expr(shader: ShaderDef, uv_index: int, blend_nod
 
 
 def link_parallax_uvs(b: ShaderBuilder):
-    from ..shared.shader_expr import compile_expr
+    from ...shared.shader_expr import compile_expr
 
     shader = b.shader
     node_tree = b.node_tree
@@ -889,8 +889,8 @@ def link_parallax_uvs(b: ShaderBuilder):
 
 
 def link_displacement(b: ShaderBuilder):
-    from ..shared.shader_expr import compile_expr
-    from ..shared.shader_expr.builtins import tex, uv
+    from ...shared.shader_expr import compile_expr
+    from ...shared.shader_expr.builtins import tex, uv
 
     shader = b.shader
     if not _is_displacement(shader):
@@ -937,8 +937,8 @@ def link_diffuses(b: ShaderBuilder, tex1, tex2):
 
 
 def link_normal_and_specular(b: ShaderBuilder, bumptex, spectex, detltex) -> Optional[bpy.types.NodeSocket]:
-    from ..shared.shader_expr.builtins import f2v
-    from ..shared.shader_expr import compile_exprs
+    from ...shared.shader_expr.builtins import f2v
+    from ...shared.shader_expr import compile_exprs
 
     node_tree = b.node_tree
     links = node_tree.links
@@ -980,7 +980,7 @@ def link_normal_and_specular(b: ShaderBuilder, bumptex, spectex, detltex) -> Opt
 
 
 def link_terrain_specular(b: ShaderBuilder):
-    from ..shared.shader_expr import compile_exprs
+    from ...shared.shader_expr import compile_exprs
 
     intensity, roughness, ior = gta_specular_expr(b.shader, None)
     if intensity is None:
@@ -1733,14 +1733,14 @@ def create_shader(filename: str, in_place_material: Optional[bpy.types.Material]
 
 
 def grass_batch_color_tint() -> expr.ShaderExpr:
-    from ..shared.shader_expr.expr import ColorBlend
-    from ..shared.shader_expr.builtins import (
+    from ...shared.shader_expr.expr import ColorBlend
+    from ...shared.shader_expr.builtins import (
         color_attribute,
         attribute,
         mix_color,
         vec,
     )
-    from ..ymap_next.grass import GrassBatchAttr
+    from ...ymap_next.grass import GrassBatchAttr
 
     attr_c1 = color_attribute(get_color_attr_name(1))
     attr_grass_color = attribute(GrassBatchAttr.COLOR_AO)
@@ -1792,7 +1792,7 @@ def add_vehicle_lights_emissive_toggle_nodes(builder: ShaderBuilder):
 
 
 def vehicle_lights_emissive_toggles() -> expr.ShaderExpr:
-    from ..shared.shader_expr.builtins import (
+    from ...shared.shader_expr.builtins import (
         color_attribute,
         float_param,
         value,
@@ -1825,7 +1825,7 @@ def add_vehicle_dirt_nodes(builder: ShaderBuilder):
 
 
 def vehicle_dirt_overlay() -> expr.ShaderExpr:
-    from ..shared.shader_expr.builtins import (
+    from ...shared.shader_expr.builtins import (
         tex,
         value,
         vec,
@@ -1869,7 +1869,7 @@ def add_vehicle_body_color_nodes(builder: ShaderBuilder):
 
 
 def vehicle_body_color() -> expr.ShaderExpr:
-    from ..shared.shader_expr.builtins import (
+    from ...shared.shader_expr.builtins import (
         param,
         vec,
         vec_value,
@@ -1898,7 +1898,7 @@ def vehicle_body_color() -> expr.ShaderExpr:
 
 def get_vehicle_material_paint_layer(mat: bpy.types.Material) -> int:
     """Get material paint layer (i.e Primary, Secondary) based on the value of matDiffuseColor."""
-    from ..yft.properties import VehiclePaintLayer
+    from ...yft.properties import VehiclePaintLayer
 
     paint_layer_int = VehiclePaintLayer.CUSTOM.value
     if mat.node_tree is None:
@@ -1947,7 +1947,7 @@ def set_vehicle_material_paint_layer(mat: bpy.types.Material, value_int: int):
 
 def update_vehicle_material_paint_name(mat: bpy.types.Material):
     """Update material name to have [PAINT_LAYER] extension at the end."""
-    from ..yft.properties import VehiclePaintLayer
+    from ...yft.properties import VehiclePaintLayer
 
     def _get_paint_layer_name(_paint_layer: VehiclePaintLayer):
         if _paint_layer == VehiclePaintLayer.CUSTOM or _paint_layer == VehiclePaintLayer.DEFAULT:

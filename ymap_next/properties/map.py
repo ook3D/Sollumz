@@ -973,7 +973,7 @@ class MapEntity(MapItemMixin, PropertyGroup, ExtensionsContainer):
         if not obj:
             return
 
-        from ...ydr.shader_materials import apply_tint_preview_index
+        from ...ydr.gta5.shader_materials import apply_tint_preview_index
 
         apply_tint_preview_index(obj, self.tint_value)
 
