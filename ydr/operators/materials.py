@@ -321,15 +321,6 @@ class SOLLUMZ_OT_auto_convert_current_material(bpy.types.Operator):
         return {"FINISHED"}
 
 
-def post_create_shader_add_default_images(material: bpy.types.Material):
-    for n in material.node_tree.nodes:
-        if isinstance(n, bpy.types.ShaderNodeTexImage) and not n.image:
-            # TODO: don't create new texture for hidden texture parameters
-            # TODO: should we reuse the image
-            texture = bpy.data.images.new(name="Texture", width=512, height=512)
-            n.image = texture
-
-
 def post_create_shader_update_object(obj: bpy.types.Object, material: bpy.types.Material):
     mesh = obj.data
 
@@ -361,7 +352,6 @@ class SOLLUMZ_OT_create_shader_material(SOLLUMZ_OT_base, bpy.types.Operator):
         mesh = obj.data
         mat = create_shader(shader_filename)
         mesh.materials.append(mat)
-        post_create_shader_add_default_images(mat)
         post_create_shader_update_object(obj, mat)
         self.message(f"Added a {shader_filename} shader to {obj.name}.")
 
@@ -409,7 +399,6 @@ class SOLLUMZ_OT_change_shader(SOLLUMZ_OT_base, bpy.types.Operator):
         create_shader(new_shader_filename, in_place_material=mat)
         shader_preset_apply_dict(mat, tmp_preset, apply_textures=True)
 
-        post_create_shader_add_default_images(mat)
         for obj in bpy.data.objects:  # update all objects that are using this material
             if obj.type == "MESH" and mat.name in obj.data.materials:
                 post_create_shader_update_object(obj, mat)

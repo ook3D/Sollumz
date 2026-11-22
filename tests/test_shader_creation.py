@@ -98,6 +98,22 @@ def test_shaders_with_a_spec_map_always_get_specular():
     assert not missing, f"Shaders with a spec map but no specular values, add them to VEHICLE_SPECULAR_CONSTANTS: {missing}"
 
 
+def test_ops_create_shader_material_leaves_texture_nodes_empty(plane_object):
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.ops.object.select_all(action="DESELECT")
+    plane_object.select_set(True)
+    images_before = set(bpy.data.images)
+
+    bpy.ops.sollumz.createshadermaterial(shader_index=SOLLUMZ_SHADERS.index("normal_spec.sps"))
+
+    # No placeholder images, they would be exported as textures named after them
+    nodes = plane_object.active_material.node_tree.nodes
+    texture_nodes = [n for n in nodes if isinstance(n, bpy.types.ShaderNodeTexImage)]
+    assert texture_nodes
+    assert all(n.image is None and n.sollumz_texture_name == "" for n in texture_nodes)
+    assert set(bpy.data.images) == images_before
+
+
 def test_ops_update_tint_shader_correctly_syncs_attribute_names(plane_object):
     bpy.ops.object.mode_set(mode="OBJECT")
     bpy.ops.object.select_all(action='DESELECT')
