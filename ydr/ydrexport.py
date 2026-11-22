@@ -773,8 +773,9 @@ def get_embedded_textures_from_materials(
     """Builds the embedded texture dictionary for `materials`.
 
     When `out_hd_textures` is given, textures flagged as HD are split: the returned dictionary
-    gets a copy with the first mip level dropped and the full-resolution texture is added to `out_hd_textures`,
-    to be exported in a separate '+hi' texture dictionary. When `None`, textures keep their full resolution.
+    gets a copy with the first mip levels dropped and the full-resolution texture is added to
+    `out_hd_textures`, to be exported in a separate '+hi' texture dictionary. When `None`,
+    textures keep their full resolution.
     """
     from ..ytd.ytdexport import extract_texture_dds_data_source, split_embedded_texture
     textures = {}

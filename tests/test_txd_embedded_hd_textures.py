@@ -67,10 +67,48 @@ def test_split_embedded_texture_hd_single_mip_keeps_full_res():
     with log_capture() as logs:
         texture, hi_texture = split_embedded_texture(img, "tex")
 
-    logs.assert_warning(match="Cannot drop first mip")
+    logs.assert_warning(match="Cannot downscale HD texture")
     assert (texture.width, texture.height) == (16, 16)
     assert texture.data.read_bytes() == dds
     assert (hi_texture.width, hi_texture.height) == (16, 16)
+    assert hi_texture.data.read_bytes() == dds
+
+
+def _dropped_mips(dds: bytes, levels: int) -> bytes:
+    for _ in range(levels):
+        dds = dropped_mip(dds)
+    return dds
+
+
+def test_split_embedded_texture_hd_downscale_levels():
+    dds = make_bc1_dds(16, 16, 3)
+    img = new_packed_dds_image("tex.dds", dds)
+    img.sz_is_hd = True
+    img.sz_hd_downscale_levels = 2
+
+    with log_capture() as logs:
+        texture, hi_texture = split_embedded_texture(img, "tex")
+
+    logs.assert_no_warnings_or_errors()
+    assert (texture.width, texture.height) == (4, 4)
+    assert texture.data.read_bytes() == _dropped_mips(dds, 2)
+    assert (hi_texture.width, hi_texture.height) == (16, 16)
+    assert hi_texture.data.read_bytes() == dds
+
+
+def test_split_embedded_texture_hd_downscale_levels_clamped_to_mip_count():
+    dds = make_bc1_dds(16, 16, 3)
+    img = new_packed_dds_image("tex.dds", dds)
+    img.sz_is_hd = True
+    img.sz_hd_downscale_levels = 5
+
+    with log_capture() as logs:
+        texture, hi_texture = split_embedded_texture(img, "tex")
+
+    # Keeps the last mip level
+    logs.assert_warning(match="only has enough mip levels to be downscaled 2 time")
+    assert (texture.width, texture.height) == (4, 4)
+    assert texture.data.read_bytes() == _dropped_mips(dds, 2)
     assert hi_texture.data.read_bytes() == dds
 
 
@@ -122,7 +160,7 @@ def _embedded_texture_sizes(xml_path: Path, texture_name: str) -> list[tuple[int
     return sizes
 
 
-def _setup_and_export_hd_drawable(tmp_path: Path) -> tuple[bytes, bytes]:
+def _setup_and_export_hd_drawable(tmp_path: Path, downscale_levels: int = 1) -> tuple[bytes, bytes]:
     """Creates a drawable with an HD texture and a normal texture, then exports it.
     Returns the full-resolution DDS bytes of the HD texture and of the normal texture.
     """
@@ -132,6 +170,7 @@ def _setup_and_export_hd_drawable(tmp_path: Path) -> tuple[bytes, bytes]:
     sd_dds = make_bc1_dds(16, 16, 1)
     hd_img = new_packed_dds_image("hd_tex.dds", full_dds)
     hd_img.sz_is_hd = True
+    hd_img.sz_hd_downscale_levels = downscale_levels
     sd_img = new_packed_dds_image("sd_tex.dds", sd_dds)
 
     hd_obj = _new_plane_obj("hd_model")
@@ -383,21 +422,24 @@ def test_import_ydd_shared_hd_texture(tmp_path):
     assert "hd_tex.dds.001" not in bpy.data.images
 
 
+@pytest.mark.parametrize("downscale_levels", (1, 2))
 @assert_logs_no_warnings_or_errors
-def test_import_export_roundtrip_preserves_hd_split(tmp_path):
-    full_dds, sd_dds = _setup_and_export_hd_drawable(tmp_path)
+def test_import_export_roundtrip_preserves_hd_split(tmp_path, downscale_levels):
+    full_dds, sd_dds = _setup_and_export_hd_drawable(tmp_path, downscale_levels)
+    base_size = 16 >> downscale_levels
 
     _import_files(tmp_path / "gen8", ["test_drawable.ydr.xml"])
+    assert bpy.data.images["hd_tex.dds"].sz_hd_downscale_levels == downscale_levels
 
     roundtrip_path = tmp_path / "roundtrip"
     roundtrip_path.mkdir()
     _export_obj(bpy.data.objects["test_drawable"], roundtrip_path)
 
     gen8 = roundtrip_path / "gen8"
-    assert _embedded_texture_sizes(gen8 / "test_drawable.ydr.xml", "hd_tex") == [(8, 8)]
+    assert _embedded_texture_sizes(gen8 / "test_drawable.ydr.xml", "hd_tex") == [(base_size, base_size)]
     assert _embedded_texture_sizes(gen8 / "test_drawable.ydr.xml", "sd_tex") == [(16, 16)]
     assert _embedded_texture_sizes(gen8 / "test_drawable+hidr.ytd.xml", "hd_tex") == [(16, 16)]
     assert _embedded_texture_sizes(gen8 / "test_drawable+hidr.ytd.xml", "sd_tex") == []
-    assert (gen8 / "test_drawable" / "hd_tex.dds").read_bytes() == dropped_mip(full_dds)
+    assert (gen8 / "test_drawable" / "hd_tex.dds").read_bytes() == _dropped_mips(full_dds, downscale_levels)
     assert (gen8 / "test_drawable" / "sd_tex.dds").read_bytes() == sd_dds
     assert (gen8 / "test_drawable+hidr" / "hd_tex.dds").read_bytes() == full_dds

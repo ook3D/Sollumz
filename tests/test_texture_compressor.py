@@ -294,7 +294,7 @@ def _make_embedded_png(tmp_path, name, parameter_name):
 
 def _prepare_item(node):
     # Same tuple the export operator's pre-pass builds per embedded texture node
-    return (node.image, node.sollumz_texture_name, node.name, node.texture_properties.compressor_preset)
+    return (node.image, node.sollumz_texture_name, node.name, node.image.sz_compressor_preset)
 
 
 def _cleanup(*mats_and_imgs):
@@ -361,7 +361,7 @@ def test_image_has_alpha(context):
 
 def test_per_texture_override_selects_preset(context, tmp_path):
     img, mat, node = _make_embedded_png(tmp_path, "rock_d", "DiffuseSampler")
-    node.texture_properties.compressor_preset = "Normal"  # override the auto-matched "Diffuse"
+    node.image.sz_compressor_preset = "Normal"  # override the auto-matched "Diffuse"
     captured = []
     session = TextureConversionSession(_settings((DIFFUSE_RULE, NORMAL_RULE), _fake_run(captured)))
     try:
@@ -599,7 +599,7 @@ def test_shared_dds_texture_does_not_warn_conflicting_settings(context, tmp_path
 
 def test_dds_texture_with_stale_override_warns_once(context, tmp_path):
     img, mat, node = _make_dds_node(tmp_path, "metal", "DiffuseSampler")
-    node.texture_properties.compressor_preset = "Renamed Preset"
+    node.image.sz_compressor_preset = "Renamed Preset"
     session = TextureConversionSession(_settings((DIFFUSE_RULE,), _fake_run([])))
     try:
         with log_capture() as logs:
@@ -667,13 +667,13 @@ def test_txd_source_refresh_keeps_compressor_preset(context, tmp_path, monkeypat
         txd.new_source()
         txd.refresh_from_sources(context)
         assert len(txd.textures) == 1 and txd.textures[0].managed_by_source
-        txd.textures[0].compressor_preset = "Normal"
+        img.sz_compressor_preset = "Normal"
 
         txd.refresh_from_sources(context)
 
         assert len(txd.textures) == 1
         assert txd.textures[0].image == img
-        assert txd.textures[0].compressor_preset == "Normal"
+        assert txd.textures[0].image.sz_compressor_preset == "Normal"
     finally:
         txds = context.scene.sz_txds.texture_dictionaries
         idx = next(i for i, t in enumerate(txds) if t.name == txd_name)
@@ -1345,7 +1345,7 @@ def test_generated_image_in_txd_converted(context, tmp_path):
         txd.new_texture(img)
         assert txd.textures[0].name == "rock_d"
 
-        session.prepare([(img, "rock_d", None, "")])
+        session.prepare([(img, "rock_d", None, img.sz_compressor_preset)])
         with export_context_scope(ExportContext("test", ExportSettings(targets=()), textures=session)):
             asset, hi_asset = create_txd_asset(txd)
 

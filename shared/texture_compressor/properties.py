@@ -5,7 +5,7 @@ from bpy.props import EnumProperty, IntProperty, StringProperty
 from bpy.types import PropertyGroup
 
 from ..presets import store
-from . import BACKENDS, CompressorBackend, TextureCompressorSettings, rules_from_preset_dicts, DEFAULT_GAME
+from . import BACKENDS, CompressorBackend, TextureCompressorSettings, rules_from_preset_dicts, find_preset, DEFAULT_GAME
 from .cache import executable_fingerprint
 from .nvtt import DEFAULT_EXECUTABLE_PATH as NVTT_DEFAULT_EXECUTABLE_PATH
 
@@ -129,6 +129,22 @@ class SollumzTextureCompressorPrefs(PropertyGroup):
         ):
             return None
         return Path(bpy.path.abspath(path))
+
+
+def auto_compressor_preset_text(context, image, texture_name: str, parameter_name: str | None) -> str:
+    """Describes the compression preset picked automatically for a texture, shown in its empty override field."""
+    from ...sollumz_preferences import get_addon_preferences
+    from .imageutils import is_dds_image
+
+    backend = get_addon_preferences(context).texture_compressor.active_backend
+    if backend is None:
+        return "* Texture compression disabled"
+    if is_dds_image(image):
+        return "* Already DDS"
+    category = backend.preset_categories.get(DEFAULT_GAME)
+    presets = rules_from_preset_dicts(store.load_presets(category)) if category is not None else ()
+    preset = find_preset(presets, texture_name, parameter_name)
+    return preset.name if preset is not None else "* No matching preset"
 
 
 def compressor_preset_search(self, context, edit_text):

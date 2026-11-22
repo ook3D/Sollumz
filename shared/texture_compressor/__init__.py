@@ -11,8 +11,8 @@ automatically match textures.
 #      object's `sz_game`. Call `session.prepare(items, game)` once per game.
 #   3. Pass the asset's game to `session.get` in the YTD export code, which falls back to GTA V. E.g. add a
 #      `game` field to `ExportContext`, set where the context is created for each object or texture dictionary.
-#   4. `compressor_preset_search` (properties.py) always lists GTA V presets. Use the texture's game instead: e.g. the
-#      material's `sz_game` for shader nodes.
+#   4. `compressor_preset_search` (properties.py) always lists GTA V presets. Use the scene's game instead, the preset
+#      override is stored in the image, which isn't tied to a game.
 #   5. Preferences (ui.py): only offer games in `enabled_games` in the presets game dropdown.
 
 import fnmatch
@@ -40,14 +40,15 @@ class CompressJob:
 class PresetRule:
     name: str
     patterns: tuple[str, ...]
-    """Glob patterns matched against the lowercased texture name; empty = no name matching."""
+    """Glob patterns matched against the lowercased texture name. If empty, no name matching."""
     parameters: frozenset[str]
-    """Lowercased texture parameter names, e.g. "bumpsampler"; empty = no texture parameter matching."""
+    """Lowercased texture parameter names, e.g. "bumpsampler". If empty, no texture parameter matching."""
     args: str
     """Compressor CLI arguments."""
     args_alpha: str = ""
-    """Compressor CLI arguments used instead of `args` for textures with transparent pixels; empty = always use
-    `args`."""
+    """Compressor CLI arguments used instead of `args` for textures with transparent pixels. If empty, always use
+    `args`.
+    """
 
     def args_for(self, has_alpha: bool) -> str:
         return self.args_alpha if has_alpha and self.args_alpha else self.args

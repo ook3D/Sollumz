@@ -1,11 +1,15 @@
+import bpy
 from bpy.types import (
     Menu,
     Panel,
     UILayout,
     UIList,
+    Image,
+    ShaderNodeTexImage,
 )
 
 from ..shared.multiselection import MultiSelectUIListMixin, multiselect_ui_draw_list
+from ..shared.texture_compressor.properties import auto_compressor_preset_text
 from ..sollumz_ui import NoVisibilityToggle
 from .operators import (
     selection as txd_select_ops,
@@ -19,6 +23,73 @@ from .utils import (
     get_selected_txd_source_image,
     get_selected_txd_texture,
 )
+from .properties import get_texture_name
+
+
+class SOLLUMZ_PT_texture_settings(Panel):
+    bl_idname = "SOLLUMZ_PT_texture_settings"
+    bl_label = "Texture Settings"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "HEADER"
+    bl_ui_units_x = 14
+
+    def draw(self, context):
+        image = getattr(context, "sz_texture_image", None)
+        if image is None:
+            return
+
+        parameter_node = getattr(context, "sz_texture_parameter_node", None)
+        parameter_name = parameter_node.name if parameter_node is not None else None
+        draw_texture_settings(self.layout, context, image, parameter_name, show_texture_name=True)
+
+
+def draw_texture_settings(
+    layout: UILayout, context, image: Image, parameter_name: str | None = None, show_texture_name: bool = False
+):
+    tex_name = get_texture_name(image)
+    w, h = image.size
+    res_label = f"{w} × {h}"
+    if image.sz_is_hd:
+        levels = image.sz_hd_downscale_levels
+        lo_w, lo_h = max(1, w >> levels), max(1, h >> levels)
+        res_label += f"  →  {lo_w} × {lo_h}"
+
+    layout.use_property_split = True
+    layout.use_property_decorate = False
+    row = layout.row(align=True)
+    if show_texture_name:
+        subrow = row.row(align=True)
+        subrow.alignment = "LEFT"
+        subrow.label(text=tex_name)
+    subrow = row.row(align=True)
+    subrow.alignment = "RIGHT"
+    subrow.label(text=res_label)
+    col = layout.column(align=False, heading="HD")
+    row = col.row(align=True)
+    sub = row.row(align=True)
+    sub.prop(image, "sz_is_hd", text="")
+    sub = sub.row(align=True)
+    sub.active = image.sz_is_hd
+    sub.prop(image, "sz_hd_downscale_levels", text="Downscale")
+    if bpy.app.version >= (4, 1, 0):
+        placeholder = auto_compressor_preset_text(context, image, tex_name, parameter_name)
+        layout.prop(image, "sz_compressor_preset", placeholder=placeholder)
+    else:
+        layout.prop(image, "sz_compressor_preset")
+
+
+def draw_texture_settings_popover_button(
+    layout: UILayout, image: Image, parameter_node: ShaderNodeTexImage | None = None
+):
+    row = layout.row(align=True)
+    subrow = row.row(align=True)
+    subrow.scale_x = 0.65
+    subrow.alignment = "RIGHT"
+    subrow.prop(image, "sz_is_hd", toggle=True, text="HD")
+    row.context_pointer_set("sz_texture_image", image)
+    if parameter_node is not None:
+        row.context_pointer_set("sz_texture_parameter_node", parameter_node)
+    row.popover(SOLLUMZ_PT_texture_settings.bl_idname, text="", icon="DOWNARROW_HLT")
 
 
 class SOLLUMZ_UL_txd_list(MultiSelectUIListMixin, UIList):
@@ -95,8 +166,7 @@ class SOLLUMZ_UL_txd_texture_list(MultiSelectUIListMixin, UIList):
         if image := item.image:
             subrow = row.row(align=True)
             subrow.alignment = "RIGHT"
-            subrow.scale_x = 0.65
-            subrow.prop(image, "sz_is_hd", toggle=True, text="HD")
+            draw_texture_settings_popover_button(subrow, image)
 
     def get_item_icon(self, item) -> str | int:
         return UILayout.icon(item.image) if item.image is not None else "ERROR"
@@ -369,10 +439,8 @@ class SOLLUMZ_PT_txd_textures_panel(TxdToolChildPanel, Panel):
         if img is None:
             return
 
-        col = box.column(align=True)
-
         is_packed = bool(img.packed_files)
-        row = col.row(align=True)
+        row = box.row(align=True)
         row.context_pointer_set("edit_image", img)
         if is_packed:
             row.operator("image.unpack", text="", icon="PACKAGE")
@@ -384,12 +452,7 @@ class SOLLUMZ_PT_txd_textures_panel(TxdToolChildPanel, Panel):
         subrow.prop(img, "filepath", text="")
         subrow.operator("image.reload", text="", icon="FILE_REFRESH")
 
-        w, h = img.size
-        row = col.row(align=True)
-        row.alignment = "RIGHT"
-        row.label(text=f"{w} × {h}")
-
-        box.prop(tex, "compressor_preset")
+        draw_texture_settings(box, context, img)
 
 
 class SOLLUMZ_PT_txd_sources_panel(TxdToolChildPanel, Panel):

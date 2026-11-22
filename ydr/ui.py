@@ -27,6 +27,7 @@ from ..sollumz_ui import FlagsPanel, NoVisibilityToggle, TimeFlagsPanel
 from ..sollumz_helper import find_sollumz_parent
 from ..icons import icon_manager
 from ..shared.shader_nodes import SzShaderNodeParameter
+from ..ytd.ui import draw_texture_settings_popover_button
 from ..tools.meshhelper import (
     get_uv_map_name,
     get_color_attr_name,
@@ -749,11 +750,7 @@ class SOLLUMZ_PT_TXTPARAMS_PANEL(bpy.types.Panel):
             row = split.row(align=True)
             row.template_ID(n, "image", open="image.open")
             if n.image is not None:
-                subrow = row.row(align=True)
-                subrow.alignment = "RIGHT"
-                subrow.scale_x = 0.65
-                subrow.enabled = n.texture_properties.embedded
-                subrow.prop(n.image, "sz_is_hd", toggle=True, text="HD")
+                draw_texture_settings_popover_button(row, n.image, n)
 
             if n.image is not None:
                 split = layout.split(factor=SPLIT_FACTOR)  # split to align the props with the image selector
@@ -761,11 +758,6 @@ class SOLLUMZ_PT_TXTPARAMS_PANEL(bpy.types.Panel):
                 row = split.row()
                 row.prop(n.texture_properties, "embedded")
                 row.prop(n.image.colorspace_settings, "name", text="Color Space")
-
-                split = layout.split(factor=SPLIT_FACTOR)
-                _ = split.row()
-                row = split.row()
-                row.prop(n.texture_properties, "compressor_preset", text="Compression Preset")
 
 
 class SOLLUMZ_PT_VALUEPARAMS_PANEL(bpy.types.Panel):

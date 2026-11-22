@@ -75,7 +75,7 @@ def create_txd_asset(
 
 def split_embedded_texture(img: Image, texture_name: str) -> tuple[EmbeddedTexture, EmbeddedTexture | None]:
     """Extracts the DDS data of `img` and, if flagged as HD, splits it into a lower-resolution
-    copy with the first mip level dropped and the original full-resolution copy.
+    copy with the first `img.sz_hd_downscale_levels` mip levels dropped and the original full-resolution copy.
 
     Returns `(texture, hi_texture)`. `texture` is the one to embed in the regular asset (possibly downsized);
     `hi_texture` is the full-resolution copy for the '+hi' texture dictionary counterpart, or `None` when
@@ -88,27 +88,39 @@ def split_embedded_texture(img: Image, texture_name: str) -> tuple[EmbeddedTextu
         return EmbeddedTexture(texture_name, width, height, texture_data), None
 
     hi_texture = EmbeddedTexture(texture_name, width, height, texture_data)
-    if (lo_texture_data := _drop_first_mip(img, texture_data)) is not None:
-        texture_data = lo_texture_data
-        width = max(1, width // 2)
-        height = max(1, height // 2)
+    if (lo := _drop_mips(img, texture_data, img.sz_hd_downscale_levels)) is not None:
+        texture_data, width, height = lo
 
     return EmbeddedTexture(texture_name, width, height, texture_data), hi_texture
 
 
-def _drop_first_mip(img: Image, texture_data: DataSource | None) -> DataSource | None:
-    """DDS data of `texture_data` with the top mip level removed, for the lower-resolution variant
-    of an HD texture. Returns None when there is no data or the mip cannot be dropped, in which case
-    the full-resolution data should be kept.
+def _drop_mips(img: Image, texture_data: DataSource | None, levels: int) -> tuple[DataSource, int, int] | None:
+    """DDS data of `texture_data` with the top `levels` mip levels removed, for the lower-resolution variant
+    of an HD texture, along with its new width and height. If the texture does not have enough mip levels,
+    drops as many as it can while keeping at least one. Returns None when there is no data or no mip can be
+    dropped, in which case the full-resolution data should be kept.
     """
     if texture_data is None:
         return None
     try:
         dds = DdsFile.from_buffer(bytearray(texture_data.read_bytes()))
-        return DataSource.create(dds.drop_mip(), texture_data.name)
+        dds_bytes = dds.drop_mip()
+        dds = DdsFile.from_buffer(bytearray(dds_bytes))
+        for dropped in range(1, levels):
+            try:
+                dds_bytes = dds.drop_mip()
+            except ValueError:
+                logger.warning(
+                    f"HD texture '{img.name}' only has enough mip levels to be downscaled {dropped} time(s), not "
+                    f"{levels}. The base texture will be {dds.width} × {dds.height}."
+                )
+                break
+            dds = DdsFile.from_buffer(bytearray(dds_bytes))
     except (ValueError, OSError) as e:
-        logger.warning(f"Cannot drop first mip of HD texture '{img.name}', keeping full resolution: {e}")
+        logger.warning(f"Cannot downscale HD texture '{img.name}', keeping full resolution: {e}")
         return None
+
+    return DataSource.create(dds_bytes, texture_data.name), dds.width, dds.height
 
 
 def extract_texture_dds_data_source(img: Image, texture_name: str) -> DataSource | None:

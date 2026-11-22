@@ -396,14 +396,18 @@ def _collect_texture_compression_items(context, objs: list[Object], ytd_indices:
             continue
         for node in get_embedded_texture_nodes_from_materials(get_sollumz_materials(obj)):
             # The node name is the texture parameter this texture is assigned to (e.g. "DiffuseSampler")
-            items.append((node.image, node.sollumz_texture_name, node.name, node.texture_properties.compressor_preset))
+            img = node.image
+            items.append((img, node.sollumz_texture_name, node.name, img.sz_compressor_preset if img else ""))
 
     for txd_index in ytd_indices:
         txd = context.scene.sz_txds.texture_dictionaries[txd_index]
         # The YTD export refreshes the sources again, but do it here too so textures newly added to
         # a source folder are part of this batch. Textures not collected here are not converted.
         txd.refresh_from_sources(context)
-        items.extend((slot.image, slot.name, None, slot.compressor_preset) for slot in txd.textures)
+        items.extend(
+            (slot.image, slot.name, None, slot.image.sz_compressor_preset if slot.image else "")
+            for slot in txd.textures
+        )
 
     return items
 

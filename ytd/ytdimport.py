@@ -82,7 +82,7 @@ def import_ytd(asset: AssetWithDependencies, name: str) -> TextureDictionary:
     extract_embedded_textures(hi_textures, dir_suffix="+hi")
 
     # The base .ytd stores a low-resolution copy of each texture in the +hi.ytd. Only import the
-    # high-resolution version; export rebuilds the low-resolution copy by dropping the first mip.
+    # high-resolution version, export rebuilds the low-resolution copy by dropping mips.
     base_textures = {n: t for n, t in non_hi_txd.textures.items() if n not in hi_textures}
 
     for tex in sorted((base_textures | hi_textures).values(), key=lambda t: t.name):
@@ -90,11 +90,27 @@ def import_ytd(asset: AssetWithDependencies, name: str) -> TextureDictionary:
         img = _create_or_get_image(tex, dir_suffix="+hi" if is_hd else "")
         if is_hd:
             img.sz_is_hd = True
+            img.sz_hd_downscale_levels = calc_hd_downscale_levels(tex, non_hi_txd.textures.get(tex.name, None))
         txd.new_texture(img)
     if txd.textures:
         txd.textures.select(0)
 
     return txd
+
+
+def calc_hd_downscale_levels(hi_tex: EmbeddedTexture, base_tex: EmbeddedTexture | None) -> int:
+    """Number of times `hi_tex` is halved to get `base_tex`, the value for `Image.sz_hd_downscale_levels`.
+    Defaults to 1 when the base texture is missing or its size is not a halving of the HD texture's.
+    """
+    if base_tex is None:
+        return 1
+    w, h = hi_tex.width, hi_tex.height
+    target = (base_tex.width, base_tex.height)
+    levels = 0
+    while (w, h) != target and (w > 1 or h > 1):
+        w, h = max(1, w // 2), max(1, h // 2)
+        levels += 1
+    return levels if (w, h) == target and levels >= 1 else 1
 
 
 def _with_dir_suffix(d: Path | None, suffix: str) -> Path | None:

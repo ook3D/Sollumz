@@ -8,6 +8,7 @@ from bpy.props import (
     EnumProperty,
     PointerProperty,
     StringProperty,
+    IntProperty,
 )
 from bpy.types import (
     Context,
@@ -51,13 +52,6 @@ class TextureSlot(PropertyGroup):
     name: StringProperty(name="Name", get=get_name)
 
     managed_by_source: BoolProperty(name="Managed by Source", default=False)
-
-    compressor_preset: StringProperty(
-        name="Compression Preset",
-        description="Texture compression preset used to convert this texture to DDS on export. "
-        "Leave empty to automatically match a preset by name",
-        search=compressor_preset_search,
-    )
 
 
 class TextureSlotSelectionAccess(MultiSelectAccess):
@@ -194,13 +188,6 @@ class TextureDictionary(PropertyGroup):
         for src in self.sources:
             src.refresh(context)
 
-        # Source-managed slots are recreated below, so carry over their per-slot settings by image.
-        compressor_presets = {
-            tex.image.name: tex.compressor_preset
-            for tex in self.textures
-            if tex.managed_by_source and tex.image is not None and tex.compressor_preset
-        }
-
         self._remove_textures_from_sources()
 
         images = set(s.image for src in self.sources for s in src.images if s.use)
@@ -209,7 +196,6 @@ class TextureDictionary(PropertyGroup):
             tex = self.textures.add()
             tex.image = img
             tex.managed_by_source = True
-            tex.compressor_preset = compressor_presets.get(img.name, "")
 
         if self.textures:
             self.textures.select(0)
@@ -257,12 +243,29 @@ def register():
         name="HD",
         description=(
             "Export the full-resolution texture to a separate '+hi' texture dictionary. The base texture "
-            "dictionary gets a half-resolution copy with the first mip level dropped"
+            "dictionary gets a lower-resolution copy, downscaled as set in Downscale"
         ),
         default=False,
+    )
+    Image.sz_hd_downscale_levels = IntProperty(
+        name="Downscale",
+        description=(
+            "Number of times the base texture is halved relative to the HD texture, by dropping "
+            "that many mip levels from the start of the mip chain (1 = half size, 2 = quarter size, ...)"
+        ),
+        default=1,
+        min=1,
+    )
+    Image.sz_compressor_preset = StringProperty(
+        name="Compression Preset",
+        description="Texture compression preset used to convert this image to DDS on export. Leave empty to "
+        "automatically match a preset by texture name or texture parameter",
+        search=compressor_preset_search,
     )
 
 
 def unregister():
     del Scene.sz_txds
     del Image.sz_is_hd
+    del Image.sz_hd_downscale_levels
+    del Image.sz_compressor_preset

@@ -404,7 +404,10 @@ def shader_to_material(
                 img = bpy.data.images.new(name=tex_name, width=512, height=512)
 
             if is_hd:
+                from ..ytd.ytdimport import calc_hd_downscale_levels
+
                 img.sz_is_hd = True
+                img.sz_hd_downscale_levels = calc_hd_downscale_levels(etex, shader_group.embedded_textures[tex_name])
 
             if is_non_color_texture(filename, param_name):
                 img.colorspace_settings.is_data = True

@@ -21,7 +21,6 @@ from ..sollumz_helper import find_sollumz_parent
 from ..sollumz_properties import SOLLUMZ_UI_NAMES, items_from_enums, LODLevel, SollumType, LightType, MaterialType, FlagPropertyGroup, TimeFlagsMixin
 from .gta5.shader_materials import shadermats, shadermats_by_filename
 from .render_bucket import RenderBucket, RenderBucketEnumItems, RenderMask, RenderMaskEnumFlagItems
-from ..shared.texture_compressor.properties import compressor_preset_search
 from .light_flashiness import LightFlashiness, LightFlashinessEnumItems
 from bpy.app.handlers import persistent
 from bpy.path import basename
@@ -180,12 +179,6 @@ class ShaderProperties(bpy.types.PropertyGroup):
 
 class TextureProperties(bpy.types.PropertyGroup):
     embedded: bpy.props.BoolProperty(name="Embedded", default=False)
-    compressor_preset: bpy.props.StringProperty(
-        name="Compression Preset",
-        description="Texture compression preset used to convert this texture to DDS on export. "
-        "Leave empty to automatically match a preset by sampler and name",
-        search=compressor_preset_search,
-    )
 
 
 class BoneFlag(bpy.types.PropertyGroup):
