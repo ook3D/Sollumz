@@ -1719,6 +1719,9 @@ def create_shader(filename: str, in_place_material: Optional[bpy.types.Material]
     if shader.preset_name == "grass_batch.sps":
         add_grass_batch_color_nodes(builder)
 
+    if shader.preset_name == "trees_lod2.sps":
+        add_trees_lod2_billboard_nodes(builder)
+
     link_uv_map_nodes_to_textures(builder)
     link_tile_uvs(builder)
 
@@ -1767,6 +1770,48 @@ def add_grass_batch_color_nodes(builder: ShaderBuilder):
     builder.node_tree.links.new(orig_base_color, compiled_shader_expr.node.inputs["A"])
     builder.node_tree.links.new(orig_base_color, compiled_shader_expr.node.inputs["B"].links[0].from_node.inputs["A"])
     builder.node_tree.links.new(compiled_shader_expr.output, builder.bsdf.inputs["Base Color"])
+
+
+def trees_lod2_billboard_offset() -> expr.VectorExpr:
+    """World-space offset that moves each vertex of a `trees_lod2` quad to its billboard corner."""
+    from ...shared.shader_expr.builtins import param, uv, vec, cross, normalize, transform, lerp
+    from ...shared.shader_expr.expr import TransformSpace
+
+    corner = uv(0)
+    size = uv(2)
+    axis_aligned = uv(3).x
+    params = param("treeLod2Params")
+
+    offset_across = (corner.x - 0.5) * size.x * params.x
+    offset_up = (corner.y - 0.5) * (1.0 - size.y) * params.y
+
+    camera_right = transform(vec(1.0, 0.0, 0.0), TransformSpace.CAMERA, TransformSpace.WORLD)
+    camera_up = transform(vec(0.0, 1.0, 0.0), TransformSpace.CAMERA, TransformSpace.WORLD)
+    camera_back = transform(vec(0.0, 0.0, 1.0), TransformSpace.CAMERA, TransformSpace.WORLD)
+    world_up = vec(0.0, 0.0, 1.0)
+
+    across = lerp(camera_right, normalize(cross(world_up, camera_back)), axis_aligned)
+    up = lerp(camera_up, world_up, axis_aligned)
+
+    return across * offset_across + up * offset_up
+
+
+def trees_lod2_normal() -> expr.VectorExpr:
+    from ...shared.shader_expr.builtins import param, float_param, geometry, lerp
+
+    return lerp(param("treeLod2Normal").vec, geometry("Normal"), float_param("UseTreeNormals"))
+
+
+def add_trees_lod2_billboard_nodes(builder: ShaderBuilder):
+    from ...shared.shader_expr import compile_exprs
+
+    offset, normal = compile_exprs(builder.node_tree, trees_lod2_billboard_offset(), trees_lod2_normal())
+    builder.node_tree.links.new(offset.output, builder.material_output.inputs["Displacement"])
+    builder.node_tree.links.new(normal.output, builder.bsdf.inputs["Normal"])
+
+    # Billboards need real displacement to move the vertices
+    if bpy.app.version >= (4, 1, 0):
+        builder.material.displacement_method = "BOTH"
 
 
 VEHICLE_PREVIEW_NODE_LIGHT_EMISSIVE_TOGGLE = [

@@ -206,6 +206,20 @@ class Compiler:
         tangent.uv_map = get_uv_map_name(e.uv_map_index)
         return CompiledExpr(tangent, 0)
 
+    def visit_VectorNormalizeExpr(self, e: expr.VectorNormalizeExpr) -> CompiledExpr:
+        math = self.node_tree.nodes.new("ShaderNodeVectorMath")
+        math.operation = "NORMALIZE"
+        self.connect_vector_input(e.source, math, 0)
+        return CompiledExpr(math, 0)
+
+    def visit_VectorTransformExpr(self, e: expr.VectorTransformExpr) -> CompiledExpr:
+        transform = self.node_tree.nodes.new("ShaderNodeVectorTransform")
+        transform.vector_type = "VECTOR"
+        transform.convert_from = e.from_space.value
+        transform.convert_to = e.to_space.value
+        self.connect_vector_input(e.source, transform, 0)
+        return CompiledExpr(transform, 0)
+
     def visit_ParameterExpr(self, e: expr.ParameterExpr) -> CompiledExpr:
         # TODO: check that node exists
         param_node = self.node_tree.nodes[e.parameter_name]

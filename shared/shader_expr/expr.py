@@ -604,6 +604,54 @@ class TangentExpr(VectorExpr):
         return f"tangent({self.uv_map_index})"
 
 
+class VectorNormalizeExpr(VectorExpr):
+    """Normalize a vector to unit length."""
+
+    source: VectorExpr
+
+    def __init__(self, source: VectorExpr):
+        self.source = source
+
+    def __str__(self):
+        return f"normalize({self.source})"
+
+    def dump(self, ctx: ExprDumpContext) -> str:
+        def g():
+            source_id = self.source.dump(ctx)
+            return f"normalize({source_id})"
+        var_id = ctx.get_var_id(self, g)
+        return var_id
+
+
+class TransformSpace(str, Enum):
+    WORLD = "WORLD"
+    OBJECT = "OBJECT"
+    CAMERA = "CAMERA"
+
+
+class VectorTransformExpr(VectorExpr):
+    """Transform a direction vector between coordinate spaces."""
+
+    source: VectorExpr
+    from_space: TransformSpace
+    to_space: TransformSpace
+
+    def __init__(self, source: VectorExpr, from_space: TransformSpace, to_space: TransformSpace):
+        self.source = source
+        self.from_space = from_space
+        self.to_space = to_space
+
+    def __str__(self):
+        return f"transform({self.source}, {self.from_space.value} -> {self.to_space.value})"
+
+    def dump(self, ctx: ExprDumpContext) -> str:
+        def g():
+            source_id = self.source.dump(ctx)
+            return f"transform({source_id}, {self.from_space.value} -> {self.to_space.value})"
+        var_id = ctx.get_var_id(self, g)
+        return var_id
+
+
 class ParameterComponentExpr(FloatExpr):
     """Access a float component of a parameter."""
 

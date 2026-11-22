@@ -15,6 +15,9 @@ from .expr import (
     UVMapVectorExpr,
     GeometryExpr,
     TangentExpr,
+    VectorNormalizeExpr,
+    VectorTransformExpr,
+    TransformSpace,
     FloatSocketExpr,
     ConstructVectorExpr,
     ParameterExpr,
@@ -109,6 +112,25 @@ def geometry(socket_name: str) -> GeometryExpr:
 def tangent(uv_map_index: int) -> TangentExpr:
     """The world-space tangent of a UV map."""
     return TangentExpr(uv_map_index)
+
+
+def normalize(v: VectorExpr) -> VectorExpr:
+    """Normalize a vector to unit length."""
+    return VectorNormalizeExpr(v)
+
+
+def transform(v: VectorExpr, from_space: TransformSpace, to_space: TransformSpace) -> VectorExpr:
+    """Transform a direction vector between coordinate spaces (e.g. camera to world)."""
+    return VectorTransformExpr(v, from_space, to_space)
+
+
+def lerp(a: VectorExpr, b: VectorExpr, factor: Floaty) -> VectorExpr:
+    """Linearly interpolate between two vectors."""
+    factor = floaty(factor)
+    if isinstance(factor, FloatConstantExpr):
+        factor = f2v(factor)
+    # else, the float output is linked directly to the vector socket, Blender converts it to (f, f, f)
+    return a + (b - a) * factor
 
 
 def maxf(a: Floaty, b: Floaty) -> FloatExpr:
