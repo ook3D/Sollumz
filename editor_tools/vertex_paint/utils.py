@@ -7,6 +7,7 @@ from bpy.types import (
 )
 
 from ...icons import icon
+from ...shared.enum_items import enum_items_cache
 
 CHANNEL_LABELS = ("Red", "Green", "Blue", "Alpha")
 CHANNEL_ICONS = ("RGBA_RED", "RGBA_GREEN", "RGBA_BLUE", "RGBA_ALPHA")
@@ -27,23 +28,16 @@ class Channel(Enum):
         return icon(CHANNEL_ICONS[self.value])
 
 
+@enum_items_cache
 def ChannelEnumItems(self, context):
-    # Using a function because the icons are only available after register() is executed
-    try:
-        return ChannelEnumItems._backing
-    except AttributeError:
-        ChannelEnumItems._backing = tuple((ch.name, ch.label, "", ch.icon, ch.value) for ch in Channel)
-        return ChannelEnumItems._backing
+    return tuple((ch.name, ch.label, "", ch.icon, ch.value) for ch in Channel)
 
 
+@enum_items_cache
 def ChannelWithNoneEnumItems(self, context):
-    try:
-        return ChannelWithNoneEnumItems._backing
-    except AttributeError:
-        ChannelWithNoneEnumItems._backing = tuple((ch.name, ch.label, "", ch.icon, ch.value) for ch in Channel) + (
-            ("NONE", "None", "", "CANCEL", -1),
-        )
-        return ChannelWithNoneEnumItems._backing
+    return tuple((ch.name, ch.label, "", ch.icon, ch.value) for ch in Channel) + (
+        ("NONE", "None", "", "CANCEL", -1),
+    )
 
 
 def attr_domain_size(mesh, attr) -> int:

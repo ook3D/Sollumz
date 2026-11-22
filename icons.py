@@ -18,9 +18,13 @@ class IconManager:
         """Retrieve all .png files from a directory."""
         return {icon.stem for icon in path.glob(f"*{ICON_EXT}")}
 
+    @property
+    def is_registered(self) -> bool:
+        return self._icons_preview_collection is not None
+
     def get_icon(self, name: str) -> int:
-        """Gets a specific icon ID by name."""
-        if name not in self._icons:
+        """Gets a specific icon ID by name. Returns 0 (no icon) if not found or the icons are not registered."""
+        if name not in self._icons or not self.is_registered:
             return 0
 
         return self._icons_preview_collection[name].icon_id
@@ -60,9 +64,11 @@ ICON_GEOM_TOOL = str(ICON_DIR / "sollumz.tool")
 ICON_GEOM_GRADIENT = str(ICON_DIR / "sollumz.gradient")
 
 
-def register():
+def pre_register_classes(_classes):
+    # Before the classes, so the icons are available to code that runs while registering them,
+    # like `EnumProperty` items callbacks
     icon_manager.register()
 
 
-def unregister():
+def post_unregister_classes():
     icon_manager.unregister()
