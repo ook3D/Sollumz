@@ -217,7 +217,7 @@ class Compiler:
         transform.vector_type = "VECTOR"
         transform.convert_from = e.from_space.value
         transform.convert_to = e.to_space.value
-        self.connect_vector_input(e.source, transform, 0)
+        self.connect_vector_input(e.source, transform, "Vector")
         return CompiledExpr(transform, 0)
 
     def visit_ParameterExpr(self, e: expr.ParameterExpr) -> CompiledExpr:
