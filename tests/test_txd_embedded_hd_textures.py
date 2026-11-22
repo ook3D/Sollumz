@@ -323,6 +323,29 @@ def test_export_ydd_merges_hd_textures_across_drawables(tmp_path):
         assert (d / "test_dwd+hidd" / "hd_tex_2.dds").read_bytes() == full_dds
 
 
+def test_import_ydr_missing_embedded_texture_is_a_missing_file(context, tmp_path):
+    _setup_and_export_hd_drawable(tmp_path)
+    gen8 = tmp_path / "gen8"
+    (gen8 / "test_drawable" / "sd_tex.dds").unlink()
+
+    _import_files(gen8, ["test_drawable.ydr.xml"], textures_mode="IMPORT_DIR")
+
+    # A missing file instead of a blank generated image, so export cannot convert and embed it
+    img = bpy.data.images["sd_tex"]
+    assert (img.source, img.filepath, img.packed_file) == ("FILE", "//sd_tex.dds", None)
+
+    roundtrip_path = tmp_path / "roundtrip"
+    roundtrip_path.mkdir()
+    with log_capture() as logs:
+        _export_obj(bpy.data.objects["test_drawable"], roundtrip_path)
+    logs.assert_warning(match="'sd_tex' file does not exist", num=1)
+
+    ydr_xml = roundtrip_path / "gen8" / "test_drawable.ydr.xml"
+    assert not (roundtrip_path / "gen8" / "test_drawable" / "sd_tex.dds").exists()
+    # The shader still references the texture by name
+    assert any(e.text == "sd_tex" for e in ET.parse(ydr_xml).getroot().iter("Name"))
+
+
 @pytest.mark.parametrize("textures_mode", ("PACK", "IMPORT_DIR"))
 @assert_logs_no_warnings_or_errors
 def test_import_ydr_uses_hd_txd(context, tmp_path, textures_mode):

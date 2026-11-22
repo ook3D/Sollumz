@@ -400,8 +400,9 @@ def shader_to_material(
                 img = bpy.data.images.get(tex_name, None) or bpy.data.images.get(tex_name_dds, None)
 
             if not img:
-                # Create placeholder image if still not found
-                img = bpy.data.images.new(name=tex_name, width=512, height=512)
+                from ..ytd.ytdimport import create_missing_texture_image
+
+                img = create_missing_texture_image(tex_name)
 
             if is_hd:
                 from ..ytd.ytdimport import calc_hd_downscale_levels

@@ -148,9 +148,19 @@ def _create_or_get_image(tex: EmbeddedTexture, dir_suffix: str = "") -> bpy.type
         img = bpy.data.images.get(tex_name, None) or bpy.data.images.get(tex_name_dds, None)
 
     if not img:
-        # Create placeholder image if still not found
-        img = bpy.data.images.new(name=tex_name, width=512, height=512)
+        img = create_missing_texture_image(tex_name)
 
+    return img
+
+
+def create_missing_texture_image(tex_name: str) -> bpy.types.Image:
+    """Placeholder for a texture whose DDS file could not be found: an image whose file does not exist. Blender shows
+    it as missing, export keeps its texture name and warns about the missing file, and "Find Missing Textures" can
+    replace it.
+    """
+    img = bpy.data.images.new(name=tex_name, width=1, height=1)
+    img.source = "FILE"
+    img.filepath = f"//{tex_name}.dds"
     return img
 
 
